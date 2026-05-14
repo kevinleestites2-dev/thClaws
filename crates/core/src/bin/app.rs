@@ -222,6 +222,10 @@ async fn main() {
     endpoints::load_into_env();
     load_dotenv();
     let _ = Sandbox::init();
+    // Register first-party vertical packs (e.g. /gamedev). Idempotent
+    // — re-registration replaces the prior entry by mode_name, so this
+    // is safe if the binary is ever called twice in one process.
+    thclaws_core::verticals::register_builtin_packs();
 
     // M6.45 / #79-followup: warn if there are additional thclaws
     // copies elsewhere on PATH. On Windows pairs with the MSI's

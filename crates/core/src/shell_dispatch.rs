@@ -3032,6 +3032,47 @@ pub async fn dispatch(
                 Err(e) => emit(events_tx, format!("/dream: {e}")),
             }
         }
+        SlashCommand::Mode { sub } => {
+            use crate::repl::ModeSubcommand;
+            match sub {
+                ModeSubcommand::List => {
+                    let modes = crate::verticals::list_modes();
+                    let active = crate::verticals::active_mode_name();
+                    if modes.is_empty() {
+                        emit(events_tx, "no vertical packs registered".into());
+                    } else {
+                        let mut out = String::from("vertical packs:\n");
+                        for (name, desc) in &modes {
+                            let marker = if active.as_deref() == Some(name.as_str()) {
+                                "*"
+                            } else {
+                                " "
+                            };
+                            out.push_str(&format!("  {marker} {name} — {desc}\n"));
+                        }
+                        match &active {
+                            Some(n) => out.push_str(&format!("active: {n}")),
+                            None => out.push_str("no active mode (try /mode <name>)"),
+                        }
+                        emit(events_tx, out);
+                    }
+                }
+                ModeSubcommand::Enter(name) => match crate::verticals::enter_mode(&name) {
+                    Ok(()) => emit(events_tx, format!("entered mode: {name}")),
+                    Err(e) => emit(events_tx, format!("/mode {name} failed: {e}")),
+                },
+                ModeSubcommand::Exit => {
+                    let prior = crate::verticals::active_mode_name();
+                    match crate::verticals::exit_mode() {
+                        Ok(()) => match prior {
+                            Some(n) => emit(events_tx, format!("exited mode: {n}")),
+                            None => emit(events_tx, "no active mode".into()),
+                        },
+                        Err(e) => emit(events_tx, format!("/mode exit failed: {e}")),
+                    }
+                }
+            }
+        }
         SlashCommand::Unknown(detail) => {
             emit(events_tx, format!("unknown command: {detail}"));
         }

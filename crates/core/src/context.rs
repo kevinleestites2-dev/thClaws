@@ -108,6 +108,19 @@ impl ProjectContext {
             parts.push(format!("# Project instructions\n{}", instr.trim()));
         }
 
+        // Active vertical pack fragment — appended last so the mode's
+        // conventions take priority over the project baseline. Empty
+        // when no mode is active.
+        if let (Some(name), Some(body)) = (
+            crate::verticals::active_mode_name(),
+            crate::verticals::vertical_pack_system_prompt(),
+        ) {
+            let trimmed = body.trim();
+            if !trimmed.is_empty() {
+                parts.push(format!("# Mode: {name}\n{trimmed}"));
+            }
+        }
+
         parts.join("\n\n")
     }
 }

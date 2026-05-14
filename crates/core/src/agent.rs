@@ -839,6 +839,13 @@ impl Agent {
         self.system.push_str(text);
     }
 
+    /// Replace the system prompt wholesale. Used when the caller has
+    /// rebuilt the prompt from scratch (e.g. after entering a vertical
+    /// pack mode that adds a `# Mode: <name>` section).
+    pub fn set_system(&mut self, text: impl Into<String>) {
+        self.system = text.into();
+    }
+
     pub fn history_snapshot(&self) -> Vec<Message> {
         self.history.lock().expect("history lock").clone()
     }

@@ -82,5 +82,6 @@ pub mod uploads;
 pub mod usage;
 pub mod util;
 pub mod version;
+pub mod verticals;
 
 pub use error::{Error, Result};

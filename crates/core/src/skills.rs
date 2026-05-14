@@ -342,7 +342,12 @@ impl SkillStore {
     /// the plugins module is fully wired) or [`Self::discover_no_plugins`]
     /// when you explicitly want only filesystem-discovered skills.
     pub fn discover() -> Self {
-        Self::discover_with_extra(&crate::plugins::plugin_skill_dirs())
+        let mut extra = crate::plugins::plugin_skill_dirs();
+        // Active vertical pack contributes skill dirs while its mode is
+        // entered. Empty when no mode is active — see
+        // `verticals::vertical_pack_skill_dirs`.
+        extra.extend(crate::verticals::vertical_pack_skill_dirs());
+        Self::discover_with_extra(&extra)
     }
 
     /// Discover only filesystem-resident skills, excluding plugin

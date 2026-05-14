@@ -598,6 +598,13 @@ pub enum SlashCommand {
         /// 3b inside dream.md) to every page Pass 3 touched.
         all_sessions: bool,
     },
+    /// `/mode` family — switch the session into a vertical pack.
+    /// Bare `/mode` (or `/mode list`) lists registered packs and shows
+    /// the active one; `/mode <name>` enters; `/mode exit` clears.
+    /// Shorthand `/gamedev` parses to `Mode { sub: Enter("gamedev") }`.
+    Mode {
+        sub: ModeSubcommand,
+    },
     Unknown(String),
 }
 
@@ -607,6 +614,17 @@ pub enum SsoSubcommand {
     Login,
     Logout,
     Status,
+}
+
+/// Subcommands of `/mode`. `/mode` (no args) defaults to `List`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModeSubcommand {
+    /// Show available packs and which (if any) is active.
+    List,
+    /// Enter the named vertical pack.
+    Enter(String),
+    /// Leave the current pack (no-op if none active).
+    Exit,
 }
 
 /// Output mode for `/system`. Defaults to `Full` so a bare
@@ -1305,6 +1323,23 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
             other => SlashCommand::Unknown(format!(
                 "unknown /sso subcommand: '{other}' (try /sso, /sso login, /sso logout)"
             )),
+        },
+        "mode" => match args.trim() {
+            "" | "list" => SlashCommand::Mode {
+                sub: ModeSubcommand::List,
+            },
+            "exit" | "off" | "clear" => SlashCommand::Mode {
+                sub: ModeSubcommand::Exit,
+            },
+            name => SlashCommand::Mode {
+                sub: ModeSubcommand::Enter(name.to_string()),
+            },
+        },
+        // Shorthand: `/gamedev` ≡ `/mode gamedev`. Other vertical packs
+        // get the same treatment when they ship — see
+        // `verticals::register_builtin_packs`.
+        "gamedev" => SlashCommand::Mode {
+            sub: ModeSubcommand::Enter("gamedev".to_string()),
         },
         "skills" => SlashCommand::Skills,
         "skill" => {
@@ -2800,6 +2835,10 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "memory",   description: "List memory entries",                        category: "Context", usage: "" },
         BuiltInCommand { name: "kms",      description: "List knowledge bases",                       category: "Context", usage: "" },
 
+        // Vertical packs (modes)
+        BuiltInCommand { name: "mode",     description: "List, enter, or exit a vertical pack (e.g. gamedev)", category: "Extensions", usage: "[list | <name> | exit]" },
+        BuiltInCommand { name: "gamedev",  description: "Shorthand for /mode gamedev (p5.js web game pack)",   category: "Extensions", usage: "" },
+
         // Skills, plugins, MCP
         BuiltInCommand { name: "skills",   description: "List installed skills",                      category: "Extensions", usage: "" },
         BuiltInCommand { name: "skill",    description: "Skill subcommands (install / marketplace / search / info / show)", category: "Extensions", usage: "<sub> [args]" },
@@ -3843,9 +3882,9 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
 
     // Surface enabled plugins first — their contributions feed into the
     // skill/command stores and the MCP server list below.
-    let plugin_skill_dirs = crate::plugins::plugin_skill_dirs();
-    let plugin_command_dirs = crate::plugins::plugin_command_dirs();
-    let plugin_mcp_servers = crate::plugins::plugin_mcp_servers();
+    let mut plugin_skill_dirs = crate::plugins::plugin_skill_dirs();
+    let mut plugin_command_dirs = crate::plugins::plugin_command_dirs();
+    let mut plugin_mcp_servers = crate::plugins::plugin_mcp_servers();
     let plugin_count = crate::plugins::installed_plugins_all_scopes().len();
     if plugin_count > 0 {
         println!(
@@ -3853,6 +3892,17 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
             plugin_count
         );
     }
+
+    // Fold the active vertical pack's resources in alongside plugins.
+    // Both are empty when no mode is active. Mode entry mid-session
+    // updates the *system prompt* automatically (build_system_prompt
+    // polls `active_mode_name` each turn) but the *skill store* and
+    // *MCP server list* are snapshotted here — entering a new mode
+    // after this point won't surface new skills/MCP until `/clear` or
+    // session restart. Acceptable for v0; hot-reload is a follow-up.
+    plugin_skill_dirs.extend(crate::verticals::vertical_pack_skill_dirs());
+    plugin_command_dirs.extend(crate::verticals::vertical_pack_command_dirs());
+    plugin_mcp_servers.extend(crate::verticals::vertical_pack_mcp_servers());
 
     // Merge plugin MCP servers into config. Config entries win on name
     // clash so project-level mcp.json can override a plugin default.
@@ -6554,6 +6604,103 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 println!("{COLOR_YELLOW}/sso logout failed: {e}{COLOR_RESET}")
                             }
                         },
+                    }
+                }
+                SlashCommand::Mode { sub } => {
+                    match sub {
+                        ModeSubcommand::List => {
+                            let modes = crate::verticals::list_modes();
+                            let active = crate::verticals::active_mode_name();
+                            if modes.is_empty() {
+                                println!("{COLOR_DIM}no vertical packs registered{COLOR_RESET}");
+                            } else {
+                                println!("{COLOR_BOLD}vertical packs:{COLOR_RESET}");
+                                for (name, desc) in &modes {
+                                    let marker = if active.as_deref() == Some(name.as_str()) {
+                                        format!("{COLOR_GREEN}*{COLOR_RESET}")
+                                    } else {
+                                        " ".to_string()
+                                    };
+                                    println!("  {marker} {COLOR_CYAN}{name}{COLOR_RESET} — {COLOR_DIM}{desc}{COLOR_RESET}");
+                                }
+                                match &active {
+                                    Some(n) => println!(
+                                        "{COLOR_DIM}active: {COLOR_RESET}{COLOR_GREEN}{n}{COLOR_RESET}"
+                                    ),
+                                    None => println!("{COLOR_DIM}no active mode (try /mode <name>){COLOR_RESET}"),
+                                }
+                            }
+                        }
+                        ModeSubcommand::Enter(name) => {
+                            match crate::verticals::enter_mode(&name) {
+                                Ok(()) => {
+                                    println!(
+                                        "{COLOR_GREEN}entered mode: {name}{COLOR_RESET}"
+                                    );
+                                    // Rebuild the system prompt so the
+                                    // mode fragment (build_system_prompt
+                                    // reads active_mode_name) takes
+                                    // effect this turn, not next session.
+                                    // Memory / KMS sections are re-
+                                    // appended on the same recipe used
+                                    // at session startup — see lines
+                                    // ~3793 in this file.
+                                    let mut rebuilt = ctx.build_system_prompt(&base_prompt);
+                                    if let Some(store) = &memory_store {
+                                        if let Some(mem_section) = store.system_prompt_section() {
+                                            rebuilt.push_str("\n\n# Memory\n");
+                                            rebuilt.push_str(&mem_section);
+                                        }
+                                    }
+                                    let kms_section =
+                                        crate::kms::system_prompt_section(&config.kms_active);
+                                    if !kms_section.is_empty() {
+                                        rebuilt.push_str("\n\n");
+                                        rebuilt.push_str(&kms_section);
+                                    }
+                                    system = rebuilt.clone();
+                                    agent.set_system(rebuilt);
+                                }
+                                Err(e) => println!(
+                                    "{COLOR_YELLOW}/mode {name} failed: {e}{COLOR_RESET}"
+                                ),
+                            }
+                        }
+                        ModeSubcommand::Exit => {
+                            let prior = crate::verticals::active_mode_name();
+                            match crate::verticals::exit_mode() {
+                                Ok(()) => {
+                                    match prior {
+                                        Some(n) => println!(
+                                            "{COLOR_DIM}exited mode: {n}{COLOR_RESET}"
+                                        ),
+                                        None => println!(
+                                            "{COLOR_DIM}no active mode{COLOR_RESET}"
+                                        ),
+                                    }
+                                    // Rebuild to strip the # Mode
+                                    // section. Same recipe as Enter.
+                                    let mut rebuilt = ctx.build_system_prompt(&base_prompt);
+                                    if let Some(store) = &memory_store {
+                                        if let Some(mem_section) = store.system_prompt_section() {
+                                            rebuilt.push_str("\n\n# Memory\n");
+                                            rebuilt.push_str(&mem_section);
+                                        }
+                                    }
+                                    let kms_section =
+                                        crate::kms::system_prompt_section(&config.kms_active);
+                                    if !kms_section.is_empty() {
+                                        rebuilt.push_str("\n\n");
+                                        rebuilt.push_str(&kms_section);
+                                    }
+                                    system = rebuilt.clone();
+                                    agent.set_system(rebuilt);
+                                }
+                                Err(e) => println!(
+                                    "{COLOR_YELLOW}/mode exit failed: {e}{COLOR_RESET}"
+                                ),
+                            }
+                        }
                     }
                 }
                 SlashCommand::Skills => {

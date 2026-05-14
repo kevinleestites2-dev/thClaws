@@ -87,6 +87,10 @@ async fn main() {
     endpoints::load_into_env();
     load_dotenv();
     let _ = Sandbox::init();
+    // Register first-party vertical packs (e.g. /gamedev). Idempotent
+    // — re-registration replaces the prior entry by mode_name, so this
+    // is safe if the binary is ever called twice in one process.
+    thclaws_core::verticals::register_builtin_packs();
 
     // Org policy file enforcement (Enterprise Edition foundation).
     // Same gate as `thclaws` — a fail-closed refusal exits non-zero
