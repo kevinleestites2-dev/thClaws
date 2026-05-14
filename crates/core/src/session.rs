@@ -1585,8 +1585,14 @@ mod tests {
         // message count doesn't include provider_state.
         let meta = Session::load_meta_from(&path).unwrap();
         assert_eq!(meta.id, "sess-ps");
-        assert_eq!(meta.message_count, 2, "provider_state must NOT count as a message");
-        assert_eq!(meta.updated_at, 1200, "provider_state must NOT bump updated_at");
+        assert_eq!(
+            meta.message_count, 2,
+            "provider_state must NOT count as a message"
+        );
+        assert_eq!(
+            meta.updated_at, 1200,
+            "provider_state must NOT bump updated_at"
+        );
     }
 
     /// M6.24 BUG M3: load_meta_from of a compacted session reports

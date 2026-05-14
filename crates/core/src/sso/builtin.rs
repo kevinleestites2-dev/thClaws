@@ -233,12 +233,10 @@ pub fn invalidate_session_memo() {
     *session_memo().write().expect("session_memo write") = None;
 }
 
-fn session_memo()
--> &'static std::sync::RwLock<Option<Option<(BuiltinProvider, super::Session)>>> {
+fn session_memo() -> &'static std::sync::RwLock<Option<Option<(BuiltinProvider, super::Session)>>> {
     use std::sync::OnceLock;
-    static MEMO: OnceLock<
-        std::sync::RwLock<Option<Option<(BuiltinProvider, super::Session)>>>,
-    > = OnceLock::new();
+    static MEMO: OnceLock<std::sync::RwLock<Option<Option<(BuiltinProvider, super::Session)>>>> =
+        OnceLock::new();
     MEMO.get_or_init(|| std::sync::RwLock::new(None))
 }
 

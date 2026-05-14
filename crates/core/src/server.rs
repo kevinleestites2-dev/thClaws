@@ -218,7 +218,10 @@ async fn serve_index() -> impl IntoResponse {
     (
         [
             (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (axum::http::header::CACHE_CONTROL, "no-store, must-revalidate"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "no-store, must-revalidate",
+            ),
         ],
         FRONTEND_HTML,
     )

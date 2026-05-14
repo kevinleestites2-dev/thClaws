@@ -259,10 +259,7 @@ mod tests {
                     gemma_local.as_deref(),
                     Some("receipt, text-heavy, restaurant bill")
                 );
-                assert_eq!(
-                    gemma_version.as_deref(),
-                    Some("gemma-4-E2B-it-ONNX@q4f16")
-                );
+                assert_eq!(gemma_version.as_deref(), Some("gemma-4-E2B-it-ONNX@q4f16"));
             }
             _ => panic!("expected Upload"),
         }
