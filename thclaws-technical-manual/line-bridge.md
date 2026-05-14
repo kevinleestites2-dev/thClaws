@@ -254,6 +254,33 @@ distinguishes "stale forwarded link" from "session timed out
 mid-life". Either way the user's next action is the same — type
 `/chat` in LINE again.
 
+## File uploads (v0.9.6)
+
+LINE attachments (image / video / file) and browser-chat paperclip uploads both land in `<workspace>/uploads/` via the same `crate::uploads` helpers used by `--serve`. The wire path differs by surface:
+
+**LINE path.** When the LINE webhook fires with a message of type `image` / `video` / `file`, the relay POSTs an `upload_ref` envelope down the desktop's WS:
+
+```json
+{
+  "type": "upload_ref",
+  "request_id": "...",
+  "line_message_id": "5234...",
+  "filename": "IMG_1234.jpg",
+  "size": 2841234,
+  "mime": "image/jpeg"
+}
+```
+
+The desktop calls LINE's Messaging API `GET /v2/bot/message/<id>/content` with the channel access token, streams the bytes to `<workspace>/uploads/<unique_path(filename)>`, then dispatches the same `render_upload_message("line", &saved)` synthetic chat message the `--serve` path uses. The agent sees a uniform event — it doesn't know whether the bytes came from a phone, a browser drag-and-drop, or `POST /upload`.
+
+**Browser-chat path.** `chat.thclaws.ai`'s SPA submits via `POST /chat-bridge/upload` (multipart, same shape as `--serve`'s `/upload`). The relay forwards the bytes to the desktop over the WS as a binary frame tagged with the metadata; the desktop saves them locally and emits the synthetic message identically.
+
+**Caps + collision.** Both paths reuse the constants from `crate::uploads` — `UPLOAD_MAX_BYTES = 25 * 1024 * 1024`, `UPLOAD_MAX_FILES = 5`, `_n` suffix on collision. Exceeding the byte cap surfaces in LINE as a relay-sent error bubble; in the browser as a toast.
+
+**Channel access token.** The LINE fetch needs the OA's long-lived token. The relay holds it and stamps the desktop's `upload_ref` envelope with a short-lived signed URL (S3-style presigned shape) — the desktop never sees the raw token. Today's impl is "relay-fetches-then-streams" since presigned LINE URLs don't exist for `/message/<id>/content`; a future tweak could route via S3-cached objects to offload the relay.
+
+**AGENT.md hook.** `<workspace>/uploads/AGENT.md` is consulted on the next agent turn through the normal CLAUDE.md / AGENT.md cascade — no special wiring at the upload layer. The synthetic chat message is what triggers the agent loop; whatever the loop reads from `AGENT.md` decides what happens next.
+
 ## Workspace-only
 
 The official relay (`crates/line-server/`) is **server-side infrastructure** and never ships with the public thClaws release. `make sync-public` excludes it via `--exclude='line-server/'` in `Makefile`'s `RSYNC_CRATES_EXCLUDES`. Anyone self-hosting reimplements the protocol; the public surface is only the client-side `crates/core/src/line/` module and this doc.

@@ -215,10 +215,12 @@ impl LineEnvelopeSink for SessionSink {
                 media_type,
                 size_bytes,
                 request_id,
+                gemma_local,
+                gemma_version,
             } => {
                 eprintln!(
-                    "[line] upload: {} ({} bytes, media_type={:?})",
-                    filename, size_bytes, media_type
+                    "[line] upload: {} ({} bytes, media_type={:?}, gemma={:?})",
+                    filename, size_bytes, media_type, gemma_version
                 );
                 let saved = match crate::line::save_upload(
                     &self.workspace,
@@ -233,7 +235,11 @@ impl LineEnvelopeSink for SessionSink {
                         return;
                     }
                 };
-                let synth = crate::uploads::render_upload_message("line", &[saved]);
+                let synth = crate::uploads::render_upload_message_with_hint(
+                    "line",
+                    &[saved],
+                    gemma_local.as_deref(),
+                );
                 let handler = self.handler.clone();
                 let client = self.client.clone();
                 tokio::spawn(async move {

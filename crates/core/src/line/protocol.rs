@@ -45,6 +45,19 @@ pub enum WsEnvelope {
         media_type: Option<String>,
         size_bytes: u64,
         request_id: String,
+        /// Browser-side Gemma 4 E2B classification of the upload, when
+        /// the user opted in to the local pre-pass via the chat SPA's
+        /// settings gear (dev-plan/15 Phase 1). One short line per
+        /// image, or a `name: text · name: text` join for multi-image
+        /// uploads. Absent when opted out, when no images were in the
+        /// batch, or when the classification failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gemma_local: Option<String>,
+        /// Identifier of the model + quant that produced
+        /// `gemma_local` (e.g. `gemma-4-E2B-it-ONNX@q4f16`). Lets a
+        /// future deploy distinguish which model rendered the hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gemma_version: Option<String>,
     },
 }
 
@@ -207,12 +220,49 @@ mod tests {
                 media_type,
                 size_bytes,
                 request_id,
+                gemma_local,
+                gemma_version,
             } => {
                 assert_eq!(filename, "photo.jpg");
                 assert_eq!(content_b64, "AQIDBAU=");
                 assert_eq!(media_type.as_deref(), Some("image/jpeg"));
                 assert_eq!(size_bytes, 5);
                 assert_eq!(request_id, "req-1");
+                // Older payloads (pre-v0.9.7 relay) didn't include
+                // these fields — serde defaults them to None.
+                assert!(gemma_local.is_none());
+                assert!(gemma_version.is_none());
+            }
+            _ => panic!("expected Upload"),
+        }
+    }
+
+    #[test]
+    fn upload_decodes_with_gemma_hint() {
+        let json = r#"{
+            "kind": "upload",
+            "filename": "photo.jpg",
+            "content_b64": "AQIDBAU=",
+            "size_bytes": 5,
+            "request_id": "req-1",
+            "gemma_local": "receipt, text-heavy, restaurant bill",
+            "gemma_version": "gemma-4-E2B-it-ONNX@q4f16"
+        }"#;
+        let env: WsEnvelope = serde_json::from_str(json).unwrap();
+        match env {
+            WsEnvelope::Upload {
+                gemma_local,
+                gemma_version,
+                ..
+            } => {
+                assert_eq!(
+                    gemma_local.as_deref(),
+                    Some("receipt, text-heavy, restaurant bill")
+                );
+                assert_eq!(
+                    gemma_version.as_deref(),
+                    Some("gemma-4-E2B-it-ONNX@q4f16")
+                );
             }
             _ => panic!("expected Upload"),
         }

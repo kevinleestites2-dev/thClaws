@@ -118,6 +118,40 @@ pub fn ensure_uploads_dir(workspace: &Path) -> std::io::Result<PathBuf> {
 /// pass them straight to `Read` / `PdfRead` / `XlsxRead` without
 /// translation.
 pub fn render_upload_message(origin: &str, files: &[UploadedFile]) -> String {
+    render_upload_message_with_hint(origin, files, None)
+}
+
+/// Variant of [`render_upload_message`] that threads through an
+/// optional one-line `local_hint` produced by a browser-side
+/// classifier (today: Gemma 4 E2B running in the chat SPA's worker
+/// per dev-plan/15 Phase 1; tomorrow possibly a desktop-side
+/// classifier).
+///
+/// The hint renders as an extra line in the bracketed block:
+/// ```text
+/// [Uploaded 1 file via line:
+///   - uploads/photo_3.jpg (image/jpeg, 1.2 MB)
+///   Local classification: receipt, text-heavy, restaurant bill
+///   Read the file and respond.]
+/// ```
+///
+/// **Directive trailer.** The message ends with an explicit instruction
+/// to read the file. Without it, the model often interprets the
+/// informational header as "user mentioned an upload but didn't ask
+/// anything" and replies with "what would you like me to do with it?"
+/// — a frustrating UX for someone who just dropped a photo into the
+/// chat (reported May 2026, fixed by adding this line). Project-level
+/// `AGENT.md` / `CLAUDE.md` can override the default behaviour.
+///
+/// The hint and the directive are both treated by the agent as
+/// **untrusted user-supplied text** — same authority as anything else
+/// in the synthetic message. The hint is a head-start, not a
+/// replacement for reading the file.
+pub fn render_upload_message_with_hint(
+    origin: &str,
+    files: &[UploadedFile],
+    local_hint: Option<&str>,
+) -> String {
     if files.is_empty() {
         return String::new();
     }
@@ -136,6 +170,21 @@ pub fn render_upload_message(origin: &str, files: &[UploadedFile]) -> String {
             format_bytes(f.size_bytes),
         ));
     }
+    if let Some(hint) = local_hint
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    {
+        out.push_str(&format!("  Local classification: {hint}\n"));
+    }
+    // Directive trailer — see doc-comment for the why. Phrasing is
+    // singular/plural-aware so a single-file message reads naturally
+    // and a multi-file batch doesn't get an awkward "Read it".
+    let directive = if files.len() == 1 {
+        "Read the file and respond."
+    } else {
+        "Read the files and respond."
+    };
+    out.push_str(&format!("  {directive}\n"));
     out.push(']');
     out
 }
@@ -267,6 +316,86 @@ mod tests {
     #[test]
     fn render_upload_message_empty_files_returns_empty_string() {
         assert_eq!(render_upload_message("serve", &[]), "");
+    }
+
+    #[test]
+    fn render_upload_message_with_hint_appends_classification_line() {
+        let msg = render_upload_message_with_hint(
+            "line",
+            &[UploadedFile {
+                relative_path: "uploads/photo.jpg".into(),
+                media_type: Some("image/jpeg".into()),
+                size_bytes: 1_300_000,
+            }],
+            Some("receipt, text-heavy, restaurant bill"),
+        );
+        assert!(msg.contains("uploads/photo.jpg"));
+        assert!(msg.contains("Local classification: receipt, text-heavy, restaurant bill"));
+        assert!(msg.ends_with(']'));
+    }
+
+    #[test]
+    fn render_upload_message_appends_directive_singular() {
+        let msg = render_upload_message(
+            "line",
+            &[UploadedFile {
+                relative_path: "uploads/x.jpg".into(),
+                media_type: Some("image/jpeg".into()),
+                size_bytes: 7000,
+            }],
+        );
+        assert!(
+            msg.contains("Read the file and respond."),
+            "missing singular directive: {msg:?}"
+        );
+        assert!(!msg.contains("Read the files"));
+    }
+
+    #[test]
+    fn render_upload_message_appends_directive_plural() {
+        let msg = render_upload_message(
+            "serve",
+            &[
+                UploadedFile {
+                    relative_path: "uploads/a.txt".into(),
+                    media_type: None,
+                    size_bytes: 100,
+                },
+                UploadedFile {
+                    relative_path: "uploads/b.txt".into(),
+                    media_type: None,
+                    size_bytes: 200,
+                },
+            ],
+        );
+        assert!(
+            msg.contains("Read the files and respond."),
+            "missing plural directive: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn render_upload_message_with_hint_skips_empty_hint() {
+        let msg_none = render_upload_message_with_hint(
+            "line",
+            &[UploadedFile {
+                relative_path: "uploads/a.bin".into(),
+                media_type: None,
+                size_bytes: 10,
+            }],
+            None,
+        );
+        let msg_blank = render_upload_message_with_hint(
+            "line",
+            &[UploadedFile {
+                relative_path: "uploads/a.bin".into(),
+                media_type: None,
+                size_bytes: 10,
+            }],
+            Some("   "),
+        );
+        assert!(!msg_none.contains("Local classification"));
+        assert!(!msg_blank.contains("Local classification"));
     }
 
     #[test]
