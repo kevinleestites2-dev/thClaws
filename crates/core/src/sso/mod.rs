@@ -134,6 +134,9 @@ pub async fn login(policy: &SsoPolicy) -> Result<Session> {
 
     storage::save(&session)?;
     update_cache(Some(session.clone()));
+    // Invalidate the builtin-session memo so the next sso_status
+    // IPC re-walks storage and observes the new sign-in.
+    crate::sso::builtin::invalidate_session_memo();
     // After a successful sign-in, ask the gateway to mint an access
     // key bound to this identity and stash it in the keychain. Lets
     // a user "Sign in with Microsoft" once and have the per-provider
@@ -231,6 +234,7 @@ async fn mint_gateway_key(id_token: &str, label: &str) -> Result<()> {
 pub fn logout(policy: &SsoPolicy) -> Result<()> {
     storage::clear(&policy.issuer_url)?;
     update_cache(None);
+    crate::sso::builtin::invalidate_session_memo();
     Ok(())
 }
 

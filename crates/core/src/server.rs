@@ -39,7 +39,7 @@ use crate::uploads::{
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Multipart, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Json, Response};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use futures::{SinkExt, StreamExt};
@@ -206,7 +206,22 @@ pub async fn run_with_engine(
 }
 
 async fn serve_index() -> impl IntoResponse {
-    Html(FRONTEND_HTML)
+    // No-cache headers so users always see the bundle from the
+    // running binary. Pre-fix, no `Cache-Control` was set and
+    // browsers applied heuristic caching → after `make install` +
+    // `--serve` restart, an already-open tab kept serving the old
+    // HTML and users thought new UI was missing (May 2026 report:
+    // the Gemma settings gear "didn't appear" until hard-refresh).
+    // The bundle is embedded in the binary, so the right
+    // freshness signal is "the binary mtime" — easiest to express
+    // as `no-store` for this single, small endpoint.
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "no-store, must-revalidate"),
+        ],
+        FRONTEND_HTML,
+    )
 }
 
 async fn serve_health() -> impl IntoResponse {
