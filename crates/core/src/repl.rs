@@ -3995,6 +3995,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     let (mut mcp_clients, mut mcp_summary) =
         load_mcp_servers(&config.mcp_servers, &mut tool_registry).await;
 
+    // Fold tools contributed by the active vertical pack (e.g.
+    // /gamedev's GamedevExample, GamedevLibrary, …). Empty when no
+    // mode is active, so this is a no-op for OSS-shell sessions.
+    // Same snapshot-at-startup limitation as MCP servers: switching
+    // modes mid-session won't add new tools until `/clear`.
+    let vertical_tools = crate::verticals::vertical_pack_tools();
+    if !vertical_tools.is_empty() {
+        let n = vertical_tools.len();
+        for t in vertical_tools {
+            tool_registry.register(t);
+        }
+        println!("{COLOR_DIM}[gamedev] {n} pack tool(s) registered{COLOR_RESET}");
+    }
+
     // Try the configured provider first; on failure (missing key, etc.)
     // fall back to something usable so the REPL still opens. The user
     // can configure a real key via Settings → API Keys then `/model`

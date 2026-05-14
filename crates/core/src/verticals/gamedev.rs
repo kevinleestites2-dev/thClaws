@@ -23,7 +23,7 @@
 use super::{VerticalPack, VerticalPackResources};
 use crate::error::{Error, Result};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 const MODE_NAME: &str = "gamedev";
 const DESCRIPTION: &str = "p5.js web game development";
@@ -92,14 +92,35 @@ impl GameDevPack {
         Ok(base.join("thclaws").join("verticals").join(MODE_NAME))
     }
 
-    /// Write the embedded skill body to the cache. Unconditional —
-    /// see module docs for why we don't gate on existence.
+    /// Write a SKILL.md to the cache. If `THCLAWS_GAMEDEV_LOCAL/SKILL.md`
+    /// exists, prefer that (project-specific pro pack content) —
+    /// otherwise fall back to the embedded universal body. The
+    /// SkillStore then picks it up through the cache path returned
+    /// by `resources()`.
     fn materialize(&self, root: &std::path::Path) -> Result<()> {
         let skill_dir = root.join("skills").join(SKILL_NAME);
         std::fs::create_dir_all(&skill_dir)?;
-        std::fs::write(skill_dir.join("SKILL.md"), SKILL_BODY)?;
+        let body = match local_skill_md() {
+            Some(body) => body,
+            None => SKILL_BODY.to_string(),
+        };
+        std::fs::write(skill_dir.join("SKILL.md"), body)?;
         Ok(())
     }
+}
+
+/// Read `$THCLAWS_GAMEDEV_LOCAL/SKILL.md` if env is set and file
+/// exists. Returns None for "no pro pack configured" (fall back to
+/// embedded universal SKILL.md). Errors during read collapse to None
+/// rather than failing on_enter — a malformed env var shouldn't
+/// brick the mode entry.
+fn local_skill_md() -> Option<String> {
+    let raw = std::env::var(super::gamedev_tools::ENV_VAR).ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw).join("SKILL.md");
+    std::fs::read_to_string(&path).ok()
 }
 
 impl Default for GameDevPack {
@@ -130,11 +151,28 @@ impl VerticalPack for GameDevPack {
             // after `on_enter` succeeds.
             None => Vec::new(),
         };
+        // Native tools are only contributed when the env var points
+        // at a real local game collection — without it the tools
+        // can't do anything useful (they read from that path), so
+        // surfacing them would be misleading. The OSS-shell mode
+        // (no env var) gets just the universal SKILL.md.
+        let tools: Vec<Arc<dyn crate::tools::Tool>> =
+            if super::gamedev_tools::local_root().ok().flatten().is_some() {
+                vec![
+                    Arc::new(super::gamedev_tools::GamedevListExamplesTool),
+                    Arc::new(super::gamedev_tools::GamedevExampleTool),
+                    Arc::new(super::gamedev_tools::GamedevLibraryTool),
+                    Arc::new(super::gamedev_tools::GamedevScaffoldTool),
+                ]
+            } else {
+                Vec::new()
+            };
         VerticalPackResources {
             skill_dirs,
             command_dirs: Vec::new(),
             agent_dirs: Vec::new(),
             mcp_servers: Vec::new(),
+            tools,
         }
     }
 

@@ -37,11 +37,13 @@
 
 use crate::error::{Error, Result};
 use crate::mcp::McpServerConfig;
+use crate::tools::Tool;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
 
 pub mod gamedev;
+pub mod gamedev_tools;
 
 /// A registered vertical pack. Implementors are first-party Rust types
 /// (e.g. `GameDevPack`) registered at startup via [`register_pack`].
@@ -94,7 +96,7 @@ pub trait VerticalPack: Send + Sync {
 /// Resource bundle returned by [`VerticalPack::resources`]. Shape
 /// mirrors what `plugins::plugin_*_dirs()` produce so the discovery
 /// callers can merge both sources without special-casing.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct VerticalPackResources {
     /// Each entry is a directory whose immediate children are skill
     /// dirs containing `SKILL.md`. Fed into
@@ -111,6 +113,27 @@ pub struct VerticalPackResources {
     /// what makes a bundled-in-process vs remote/enterprise server
     /// swap transparent to the registry.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// In-process tools contributed by the pack. Registered into the
+    /// agent's `ToolRegistry` at REPL startup alongside builtins.
+    /// Use this for fast iteration when the swap-to-remote story
+    /// isn't yet needed; promote to an `McpServerConfig` later when
+    /// the same tools need to be reachable from outside thClaws.
+    pub tools: Vec<Arc<dyn Tool>>,
+}
+
+impl std::fmt::Debug for VerticalPackResources {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerticalPackResources")
+            .field("skill_dirs", &self.skill_dirs)
+            .field("command_dirs", &self.command_dirs)
+            .field("agent_dirs", &self.agent_dirs)
+            .field("mcp_servers", &self.mcp_servers.len())
+            .field(
+                "tools",
+                &self.tools.iter().map(|t| t.name()).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 /// Declarative UI panel description. The Rust side never renders
@@ -320,14 +343,35 @@ pub fn vertical_pack_ui_panels() -> Vec<UiPanel> {
     g.active().map(|p| p.ui_panels()).unwrap_or_default()
 }
 
+/// Tools contributed by the currently active pack. Returns an empty
+/// Vec when no mode is active. The REPL folds these into the
+/// `ToolRegistry` at startup, parallel to the MCP server merge.
+pub fn vertical_pack_tools() -> Vec<Arc<dyn Tool>> {
+    let g = global().read().expect("vertical pack registry poisoned");
+    g.active().map(|p| p.resources().tools).unwrap_or_default()
+}
+
 /// Register the first-party vertical packs that ship with the binary.
 ///
 /// Called once at startup by every entry point that wants vertical
 /// modes available (REPL, GUI, server). Safe to call multiple times:
 /// re-registration replaces the prior entry by `mode_name`, so a test
 /// can re-register without an unregister step.
+///
+/// If `THCLAWS_GAMEDEV_LOCAL` is set we also auto-enter `gamedev` mode
+/// — the env var is an explicit signal that the user wants the pro
+/// pack live, and forcing them to also type `/gamedev` would be
+/// redundant. `/mode exit` still works to drop back to the OSS shell.
 pub fn register_builtin_packs() {
     register_pack(Arc::new(gamedev::GameDevPack::new()));
+    if std::env::var(gamedev_tools::ENV_VAR)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        if let Err(e) = enter_mode("gamedev") {
+            eprintln!("[vertical] auto-enter gamedev failed: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -373,6 +417,7 @@ mod tests {
                 command_dirs: vec![PathBuf::from(format!("/fake/{}/cmds", self.name))],
                 agent_dirs: vec![],
                 mcp_servers: vec![],
+                tools: vec![],
             }
         }
         fn on_enter(&self) -> Result<()> {
