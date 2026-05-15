@@ -162,14 +162,20 @@ filenames are preserved (modulo path-traversal sanitisation —
 **From the browser chat** (`chat.thclaws.ai`): drag-and-drop files
 onto the chat surface, or click the paperclip icon next to the
 composer. The desktop sends a synthetic chat message describing
-the upload (filename + size) so the agent sees the event without
-having to read every byte.
+the upload (filename + size) followed by a `Read the file and
+respond.` directive line, so the agent treats the drop as a
+request to act on the contents — not just an FYI. (Pre-v0.9.7,
+the synth was purely informational and some models would reply
+"what would you like me to do with this?". Project-level
+`AGENT.md` / `CLAUDE.md` can override the directive if that
+behavior was actually what you wanted.)
 
 **From LINE**: send the file as a normal LINE attachment (photo,
 video, file). The relay forwards the upload reference via the
 broker channel; the desktop fetches the bytes from LINE's CDN
 using the channel access token and saves them locally. The agent
-then sees the same synthetic message shape as the browser path.
+then sees the same synthetic message shape as the browser path,
+including the same `Read the file and respond.` directive.
 
 **Where to control behavior:** drop an `AGENT.md` at
 `<workspace>/uploads/AGENT.md` (or at the workspace root if you

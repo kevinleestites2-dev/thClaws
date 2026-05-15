@@ -55,7 +55,30 @@ below for those numbers.
 
 ### macOS
 
-1. Download the matching `thclaws-<version>-<arch>-apple-darwin.tar.gz`.
+**Recommended — universal `.dmg` installer**
+
+1. Download `thclaws-<version>-universal-apple-darwin.dmg`. One file
+   covers both Apple Silicon and Intel — no architecture pick needed.
+2. Double-click the `.dmg`, then drag **thClaws** into the
+   **Applications** folder when the installer window appears.
+3. Open thClaws from Launchpad or Spotlight. On first launch,
+   Gatekeeper may say "thClaws can't be opened because Apple cannot
+   check it for malicious software" — click **OK**, then in **System
+   Settings → Privacy & Security**, scroll to the message about
+   thClaws and click **Open Anyway**. macOS will remember the choice.
+4. The desktop app installs a `thclaws` and `thclaws-cli` CLI shim on
+   `$PATH` on first launch (via the **Install CLI tools** menu item if
+   it doesn't happen automatically). After that, both `thclaws` and
+   `thclaws-cli` work from any terminal.
+
+That's it — no `PATH` editing, no `xattr` cleanup.
+
+<details>
+<summary><strong>Manual install (fallback)</strong> — for headless / SSH / scripted boxes where the GUI installer can't run.</summary>
+
+1. Download the architecture-specific tarball:
+   `thclaws-<version>-aarch64-apple-darwin.tar.gz` (Apple Silicon) or
+   `thclaws-<version>-x86_64-apple-darwin.tar.gz` (Intel).
 2. Extract and move the binary onto your `PATH`:
 
    ```bash
@@ -72,13 +95,13 @@ below for those numbers.
    export PATH="$HOME/.local/bin:$PATH"
    ```
 
-4. On first launch, macOS Gatekeeper may block the unsigned binary
-   ("cannot be opened because the developer cannot be verified"). Clear
-   the quarantine flag one-time:
+4. Clear the Gatekeeper quarantine flag one-time so the binary can run:
 
    ```bash
    $ xattr -d com.apple.quarantine ~/.local/bin/thclaws ~/.local/bin/thclaws-cli
    ```
+
+</details>
 
 ### Linux
 
@@ -97,6 +120,29 @@ below for those numbers.
 
 ### Windows
 
+**Recommended — `.msi` installer**
+
+1. Download the matching `.msi`:
+   - **`thclaws-<version>-x86_64-pc-windows-msvc.msi`** for Intel /
+     AMD Windows (the typical case).
+   - **`thclaws-<version>-aarch64-pc-windows-msvc.msi`** for Windows
+     on ARM (Surface Pro X, Snapdragon X laptops, etc.).
+2. Double-click the `.msi`. The installer is per-user (no admin
+   prompt), drops the binaries into `%LOCALAPPDATA%\Programs\thclaws`,
+   adds that directory to your user `PATH`, and creates a Start menu
+   entry.
+3. Open a fresh PowerShell or terminal window — `thclaws` and
+   `thclaws-cli` are on `PATH`. Launch the GUI from Start.
+
+Windows SmartScreen may say "Windows protected your PC" on first run
+because the binary isn't signed yet — click **More info → Run
+anyway**.
+
+That's it — no `PATH` editing, no environment-variables dialog.
+
+<details>
+<summary><strong>Manual install (fallback)</strong> — if you'd rather skip the installer (e.g. portable install on a USB stick, automation pipeline, locked-down policy that blocks <code>.msi</code>).</summary>
+
 > **What `%LOCALAPPDATA%` means** — it's a Windows environment variable
 > that expands to `C:\Users\<your-username>\AppData\Local`. So
 > `%LOCALAPPDATA%\Programs\thclaws` becomes
@@ -112,6 +158,8 @@ below for those numbers.
    - Start → "Edit environment variables for your account"
    - Path → Edit → New → `%LOCALAPPDATA%\Programs\thclaws`
    - OK → open a new PowerShell / terminal window.
+
+</details>
 
 ## Run via Docker
 
