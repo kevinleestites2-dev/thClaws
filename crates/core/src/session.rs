@@ -528,6 +528,17 @@ impl Session {
                     // broadcaster which writes a fresh snapshot —
                     // not user activity). Same rule for goal_snapshot.
                 }
+                "provider_state" => {
+                    // Provider-side session id capture (Agent SDK
+                    // resume support). Doesn't carry a message body
+                    // or activity timestamp — meta scan ignores it
+                    // entirely. The full load_from path consumes it
+                    // for the provider_session_id field on Session.
+                    // Pre-fix, the unrecognised `_` arm flagged
+                    // every AgentSdk session's file as "1 corrupt
+                    // line" on every sidebar refresh (May 2026 user
+                    // report).
+                }
                 "user" | "assistant" | "system" => {
                     if let Some(ts) = val.get("timestamp").and_then(|v| v.as_u64()) {
                         if ts > last_timestamp {
@@ -1542,6 +1553,46 @@ mod tests {
         // plan_snapshot's 99999 timestamp must NOT bump updated_at —
         // M6.16.1 fix preserved.
         assert_eq!(streamed.updated_at, 1300);
+    }
+
+    /// Regression for the May 2026 user report: every session file
+    /// created by an Agent SDK turn writes a `provider_state` event
+    /// carrying the upstream session_id. The meta scanner used by
+    /// the sidebar refresh fell through to the unknown-event arm and
+    /// counted each one as "1 corrupt line(s)", producing a yellow
+    /// stderr line per session on every list refresh.
+    #[test]
+    fn load_meta_from_recognises_provider_state_without_warning() {
+        let td = tempdir().unwrap();
+        let path = td.path().join("sess-provider-state.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"header","id":"sess-ps","model":"agent/claude-sonnet-4-6","cwd":"/tmp","created_at":1000}"#,
+                "\n",
+                r#"{"type":"user","content":[{"type":"text","text":"hi"}],"timestamp":1100}"#,
+                "\n",
+                r#"{"type":"provider_state","provider_session_id":"abcd1234","timestamp":1150}"#,
+                "\n",
+                r#"{"type":"assistant","content":[{"type":"text","text":"hello"}],"timestamp":1200}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        // No way to assert "no eprintln" directly from a unit test,
+        // but we can assert the meta scan parses correctly and the
+        // message count doesn't include provider_state.
+        let meta = Session::load_meta_from(&path).unwrap();
+        assert_eq!(meta.id, "sess-ps");
+        assert_eq!(
+            meta.message_count, 2,
+            "provider_state must NOT count as a message"
+        );
+        assert_eq!(
+            meta.updated_at, 1200,
+            "provider_state must NOT bump updated_at"
+        );
     }
 
     /// M6.24 BUG M3: load_meta_from of a compacted session reports

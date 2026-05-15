@@ -1981,9 +1981,8 @@ async fn run_worker(
                     // keeps the broadcast-bus consumer (this loop)
                     // non-blocking even if HTTP RTT spikes.
                     let bridge_tx = bridge_client.as_ref().map(|client| {
-                        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
-                            serde_json::Value,
-                        >();
+                        let (tx, mut rx) =
+                            tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
                         let client = client.clone();
                         tokio::spawn(async move {
                             while let Some(envelope) = rx.recv().await {
@@ -1995,16 +1994,9 @@ async fn run_worker(
                                 // surface as eprintln after one retry
                                 // and the chunk is lost — that's
                                 // a separate Phase-2 hardening item.
-                                if let Err(first) =
-                                    client.push_chat_event(envelope.clone()).await
-                                {
-                                    tokio::time::sleep(
-                                        std::time::Duration::from_millis(150),
-                                    )
-                                    .await;
-                                    if let Err(second) =
-                                        client.push_chat_event(envelope).await
-                                    {
+                                if let Err(first) = client.push_chat_event(envelope.clone()).await {
+                                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                                    if let Err(second) = client.push_chat_event(envelope).await {
                                         eprintln!(
                                             "[line] chat-bridge push failed (retry exhausted): \
                                              first={first}, second={second}"

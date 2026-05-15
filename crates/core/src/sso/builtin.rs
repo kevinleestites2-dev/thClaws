@@ -185,14 +185,59 @@ pub fn available() -> Vec<BuiltinProvider> {
 /// session in the keychain. Used by the state payload to decide
 /// "logged in as X" without requiring a separate chosen-provider
 /// persistence file.
+///
+/// **Per-process memo (May 2026):** the navbar `LoginButton` re-fetches
+/// `sso_status` on window-focus + dropdown-open + react-strict-mode
+/// double-mount, so this can fire dozens of times across a session.
+/// Each call walks `storage::load(...)` which, when the marker file
+/// names a known issuer, hits the OS keychain. On macOS, a freshly-
+/// rebuilt binary has a new code signature → every keychain access
+/// triggers an ACL prompt regardless of any "Always Allow" the user
+/// previously granted. Result: a developer running `make install`
+/// then launching the GUI sees 20+ prompts in rapid succession
+/// (reported May 2026).
+///
+/// Fix: memoize the result for the lifetime of the process. The
+/// FIRST call walks storage; subsequent calls return the cached
+/// answer instantly. Sign-in / sign-out paths invalidate via
+/// [`invalidate_session_memo`] so the UI reflects state changes
+/// without restart. Expired sessions also re-walk so refresh stays
+/// timely.
 pub fn current_session_any() -> Option<(BuiltinProvider, super::Session)> {
-    for p in available() {
-        let Ok(policy) = p.resolve() else { continue };
-        if let Some(s) = super::storage::load(&policy.issuer_url) {
-            return Some((p, s));
+    {
+        let guard = session_memo().read().expect("session_memo read");
+        if let Some(cached) = guard.as_ref() {
+            // Any of (a) no-session memo, (b) live session — return
+            // without touching keychain.
+            return cached.clone().filter(|(_, s)| !s.is_expired());
         }
     }
-    None
+    let resolved: Option<(BuiltinProvider, super::Session)> = (|| {
+        for p in available() {
+            let Ok(policy) = p.resolve() else { continue };
+            if let Some(s) = super::storage::load(&policy.issuer_url) {
+                return Some((p, s));
+            }
+        }
+        None
+    })();
+    *session_memo().write().expect("session_memo write") = Some(resolved.clone());
+    resolved
+}
+
+/// Invalidate the [`current_session_any`] memo. Called by
+/// `sso::login` after a successful sign-in and by `sso::logout`
+/// after a clear, so the next `build_state_payload()` re-walks
+/// storage and observes the new state.
+pub fn invalidate_session_memo() {
+    *session_memo().write().expect("session_memo write") = None;
+}
+
+fn session_memo() -> &'static std::sync::RwLock<Option<Option<(BuiltinProvider, super::Session)>>> {
+    use std::sync::OnceLock;
+    static MEMO: OnceLock<std::sync::RwLock<Option<Option<(BuiltinProvider, super::Session)>>>> =
+        OnceLock::new();
+    MEMO.get_or_init(|| std::sync::RwLock::new(None))
 }
 
 #[cfg(test)]

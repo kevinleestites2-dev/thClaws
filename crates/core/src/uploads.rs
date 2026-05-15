@@ -170,10 +170,7 @@ pub fn render_upload_message_with_hint(
             format_bytes(f.size_bytes),
         ));
     }
-    if let Some(hint) = local_hint
-        .map(str::trim)
-        .filter(|h| !h.is_empty())
-    {
+    if let Some(hint) = local_hint.map(str::trim).filter(|h| !h.is_empty()) {
         out.push_str(&format!("  Local classification: {hint}\n"));
     }
     // Directive trailer — see doc-comment for the why. Phrasing is
