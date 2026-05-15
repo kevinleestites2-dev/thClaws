@@ -163,6 +163,7 @@ impl VerticalPack for GameDevPack {
                     Arc::new(super::gamedev_tools::GamedevExampleTool),
                     Arc::new(super::gamedev_tools::GamedevLibraryTool),
                     Arc::new(super::gamedev_tools::GamedevScaffoldTool),
+                    Arc::new(super::gamedev_tools::GamedevPreviewTool::default()),
                 ]
             } else {
                 Vec::new()

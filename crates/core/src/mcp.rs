@@ -1056,6 +1056,9 @@ impl Tool for McpTool {
                 uri: uri.to_string(),
                 html,
                 mime,
+                // External MCP servers get the strict default sandbox.
+                // First-party tools opt in via their own UiResource.
+                allow_same_origin: false,
             }),
             Err(e) => {
                 eprintln!(

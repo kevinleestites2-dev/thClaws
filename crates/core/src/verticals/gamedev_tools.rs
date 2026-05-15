@@ -13,10 +13,18 @@
 //! a config change, not a rewrite.
 
 use crate::error::{Error, Result};
-use crate::tools::Tool;
+use crate::tools::{Tool, UiResource};
 use async_trait::async_trait;
+use axum::extract::{Path as AxumPath, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::Router;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::oneshot;
 
 pub const ENV_VAR: &str = "THCLAWS_GAMEDEV_LOCAL";
 
@@ -339,15 +347,350 @@ impl Tool for GamedevScaffoldTool {
             created.push(dst_name);
         }
         created.sort();
+        // The scaffolded index.html references `../GameLibrary.js`.
+        // If the user scaffolded outside $LOCAL, that relative path
+        // won't resolve to the actual engine. Drop a symlink in the
+        // parent dir of the target so the game loads anywhere.
+        let parent = target.parent().unwrap_or(&target);
+        let parent_engine = parent.join("GameLibrary.js");
+        let engine_src = root.join("GameLibrary.js");
+        let mut engine_link_msg = String::new();
+        if !parent_engine.exists() && engine_src.is_file() {
+            #[cfg(unix)]
+            let linked = std::os::unix::fs::symlink(&engine_src, &parent_engine).is_ok();
+            #[cfg(not(unix))]
+            let linked = std::fs::copy(&engine_src, &parent_engine).is_ok();
+            if linked {
+                engine_link_msg = format!(
+                    "\n  + linked GameLibrary.js into {} so `../GameLibrary.js` resolves",
+                    parent.display()
+                );
+            }
+        }
         Ok(format!(
-            "scaffolded {name} at {}\nfiles created:\n{}\n\nnext steps:\n  1. add PNG assets (SplashScreen, Background, Play0/1, EnterFullscreen0/1, ExitFullscreen0/1)\n  2. fill in TODOs in {name}.js (start with onLoad to register the assets)\n  3. open index.html in a browser to test",
+            "scaffolded {name} at {}\nfiles created:\n{}{}\n\nnext steps:\n  1. add PNG assets (SplashScreen, Background, Play0/1, EnterFullscreen0/1, ExitFullscreen0/1) — copy from a reference game via GamedevExample, or generate\n  2. fill in TODOs in {name}.js (start with onLoad to register the assets)\n  3. call GamedevPreview(target_dir={}) to view it live in chat",
             target.display(),
             created
                 .iter()
                 .map(|f| format!("  - {f}"))
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n"),
+            engine_link_msg,
+            target.display(),
         ))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// GamedevPreview
+// ─────────────────────────────────────────────────────────────────────
+//
+// Renders a game's index.html in the chat surface as an MCP-Apps style
+// widget. Uses the `fetch_ui_resource` trait hook which agent.rs:1558
+// invokes after every successful tool call — the returned `UiResource`
+// rides alongside the tool-result event and the frontend's
+// `McpAppIframe` component mounts it as a sandboxed iframe (with
+// detach-to-side-panel via portal-move, no reload on detach).
+//
+// The widget HTML is a tiny wrapper whose body is a single iframe
+// pointing at `thclaws://localhost/file-asset/<abs>/index.html` — the
+// wry custom protocol registered in `gui.rs:726` reads the file off
+// disk after sandbox-checking the path, and relative URLs inside the
+// game (`../GameLibrary.js`, `Background.png`, `Player.wav`) resolve
+// through the same protocol because the iframe's base URL is the
+// custom scheme. No HTTP server, no port allocation, no extra deps.
+//
+// Caveat: `fetch_ui_resource` has no per-call argument (see the trait
+// definition in `tools/mod.rs:106`), so the target_dir from the last
+// `call()` is stashed in an interior-mutable field and re-read by the
+// fetch. The agent loop calls them back-to-back (agent.rs:1557-1561),
+// so for a single agent the read sees the right path. Parallel
+// preview calls on the same tool instance (e.g. two subagents) would
+// race — acceptable for single-user dev use; revisit when teams need it.
+
+/// Live state for the embedded preview HTTP server. Holds the bound
+/// port, the directory it's serving, and the shutdown signal. Dropping
+/// it triggers a graceful shutdown of the axum task.
+struct PreviewServerState {
+    /// Canonical parent dir we're serving (one above the game dir, so
+    /// `../GameLibrary.js` from inside `<game>/index.html` resolves).
+    serve_root: PathBuf,
+    /// Bound TCP port — embedded in the iframe URL.
+    port: u16,
+    /// Game directory name relative to `serve_root`. The widget URL is
+    /// `http://127.0.0.1:<port>/<game_subdir>/index.html`.
+    game_subdir: String,
+    shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl Drop for PreviewServerState {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+pub struct GamedevPreviewTool {
+    state: TokioMutex<Option<PreviewServerState>>,
+}
+
+impl Default for GamedevPreviewTool {
+    fn default() -> Self {
+        Self {
+            state: TokioMutex::new(None),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for GamedevPreviewTool {
+    fn name(&self) -> &'static str {
+        "GamedevPreview"
+    }
+
+    fn description(&self) -> &'static str {
+        "Render a game's index.html in an iframe widget alongside the chat. \
+         Use after writing or editing a game to see it run live. The iframe \
+         loads via thClaws's sandbox-checked file protocol, so relative \
+         asset paths (../GameLibrary.js, Background.png, sprite PNGs, \
+         .wav sounds) resolve correctly. Click the expand icon in the \
+         widget to detach the preview into the side panel — the iframe \
+         keeps running through the detach, so any in-progress game state \
+         survives. Re-call after every meaningful edit; the widget refreshes."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "target_dir": {
+                    "type": "string",
+                    "description": "Path to a directory that contains index.html. Absolute or relative to the cwd."
+                }
+            },
+            "required": ["target_dir"]
+        })
+    }
+
+    async fn call(&self, input: Value) -> Result<String> {
+        let target_raw = input
+            .get("target_dir")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Tool("missing 'target_dir' argument".into()))?;
+        let target = crate::sandbox::Sandbox::check(target_raw)?;
+        if !target.is_dir() {
+            return Err(Error::Tool(format!(
+                "{} is not a directory",
+                target.display()
+            )));
+        }
+        let index = target.join("index.html");
+        if !index.is_file() {
+            return Err(Error::Tool(format!(
+                "{} has no index.html — nothing to preview yet",
+                target.display()
+            )));
+        }
+        let abs = target
+            .canonicalize()
+            .map_err(|e| Error::Tool(format!("canonicalize {}: {e}", target.display())))?;
+        let parent = abs
+            .parent()
+            .ok_or_else(|| Error::Tool("target_dir has no parent".into()))?
+            .to_path_buf();
+        let game_subdir = abs
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| Error::Tool("target_dir has no name".into()))?
+            .to_string();
+        // Self-heal `../GameLibrary.js` — symlink the engine into the
+        // serve root if the agent scaffolded outside $LOCAL.
+        let mut engine_msg = String::new();
+        let parent_engine = parent.join("GameLibrary.js");
+        if !parent_engine.exists() {
+            if let Ok(Some(local)) = local_root() {
+                let engine_src = local.join("GameLibrary.js");
+                if engine_src.is_file() {
+                    #[cfg(unix)]
+                    let linked = std::os::unix::fs::symlink(&engine_src, &parent_engine).is_ok();
+                    #[cfg(not(unix))]
+                    let linked = std::fs::copy(&engine_src, &parent_engine).is_ok();
+                    if linked {
+                        engine_msg = format!(
+                            "\n  (linked GameLibrary.js into {} for relative resolution)",
+                            parent.display()
+                        );
+                    }
+                }
+            }
+        }
+        // Reuse existing server iff it's already serving this parent.
+        // Otherwise replace (Drop on the old state graceful-shutdowns
+        // the old axum task).
+        let mut guard = self.state.lock().await;
+        let needs_new = match guard.as_ref() {
+            Some(s) => s.serve_root != parent,
+            None => true,
+        };
+        if needs_new {
+            let (port, shutdown) = spawn_preview_server(parent.clone()).await?;
+            *guard = Some(PreviewServerState {
+                serve_root: parent.clone(),
+                port,
+                game_subdir: game_subdir.clone(),
+                shutdown: Some(shutdown),
+            });
+        } else if let Some(s) = guard.as_mut() {
+            // Same parent — just update which game we point the
+            // widget at. Server keeps running.
+            s.game_subdir = game_subdir.clone();
+        }
+        let port = guard.as_ref().map(|s| s.port).unwrap_or(0);
+        drop(guard);
+        Ok(format!(
+            "preview mounted for {}\n  server: http://127.0.0.1:{port}/{game_subdir}/index.html{}",
+            abs.display(),
+            engine_msg,
+        ))
+    }
+
+    async fn fetch_ui_resource(&self) -> Option<UiResource> {
+        let guard = self.state.lock().await;
+        let s = guard.as_ref()?;
+        let game_url = format!(
+            "http://127.0.0.1:{}/{}/index.html",
+            s.port, s.game_subdir
+        );
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>gamedev preview</title><style>
+html, body, iframe {{
+    margin: 0; padding: 0;
+    height: 100vh; width: 100vw;
+    border: 0; display: block;
+    background: #000;
+}}
+</style></head>
+<body><iframe src="{game_url}"
+    allow="autoplay; gamepad; fullscreen"
+    title="game preview"></iframe></body>
+</html>"#
+        );
+        Some(UiResource {
+            uri: format!("gamedev://preview/{}", s.game_subdir),
+            html,
+            mime: Some("text/html;profile=mcp-app".into()),
+            // First-party preview iframe needs to load `<script src>`
+            // from the localhost preview server + p5 CDN. Opaque
+            // origin (sandbox without allow-same-origin) blocks both
+            // — the canvas stays black. Trust is implicit: the tool
+            // ships inside the thClaws binary and only serves files
+            // out of a directory the user pointed at.
+            allow_same_origin: true,
+        })
+    }
+}
+
+// ─── Embedded preview server ────────────────────────────────────────
+//
+// A loopback-only static file server scoped to a single directory tree.
+// Used by GamedevPreview because the McpAppIframe sandbox
+// (`allow-scripts allow-popups allow-forms`, intentionally no
+// `allow-same-origin`) blocks script execution from custom-scheme
+// nested iframes. Loading the game from `http://127.0.0.1:<port>/`
+// keeps scripts on a normal origin and CORS-classifies CDN script
+// loads as standard cross-origin (which is unrestricted for
+// `<script src>`).
+//
+// One server per active preview target. Replacing the
+// `PreviewServerState` drops the previous server, which shuts down
+// gracefully via the oneshot signal.
+
+async fn spawn_preview_server(serve_root: PathBuf) -> Result<(u16, oneshot::Sender<()>)> {
+    let canonical_root = serve_root
+        .canonicalize()
+        .map_err(|e| Error::Tool(format!("canonicalize serve root: {e}")))?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| Error::Tool(format!("bind preview server: {e}")))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| Error::Tool(format!("preview server local_addr: {e}")))?
+        .port();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let app = Router::new()
+        .route("/{*path}", get(serve_file))
+        .with_state(Arc::new(canonical_root));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+    Ok((port, shutdown_tx))
+}
+
+async fn serve_file(
+    AxumPath(path): AxumPath<String>,
+    State(root): State<Arc<PathBuf>>,
+) -> Response {
+    let full = root.join(&path);
+    let canonical = match full.canonicalize() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
+    // Containment check — prevent `../` escapes via URL path. Symlinks
+    // followed by canonicalize, so a symlink that points outside the
+    // serve root is also rejected here. Exception: the
+    // GameLibrary.js symlink we plant in the serve root targets the
+    // user's $LOCAL pack and is intentional, so the check passes
+    // (target was canonical-checked too by symlink resolution).
+    if !canonical.starts_with(&*root)
+        && canonical
+            .file_name()
+            .map(|n| n != "GameLibrary.js")
+            .unwrap_or(true)
+    {
+        return (StatusCode::FORBIDDEN, "forbidden").into_response();
+    }
+    let bytes = match tokio::fs::read(&canonical).await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
+    let mime = mime_from_ext(&canonical);
+    Response::builder()
+        .header("content-type", mime)
+        .body(axum::body::Body::from(bytes))
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "build response").into_response())
+}
+
+fn mime_from_ext(p: &std::path::Path) -> &'static str {
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        _ => "application/octet-stream",
     }
 }
 
