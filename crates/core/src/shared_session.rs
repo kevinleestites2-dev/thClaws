@@ -1341,6 +1341,19 @@ async fn run_worker(
         ));
         factory
     };
+    // Fold in tools contributed by the active vertical pack (e.g.
+    // /gamedev's GamedevExample, GamedevLibrary, …). Mirrors the same
+    // merge done at REPL startup in repl.rs — GUI chat-panel sessions
+    // need pack tools too. Empty when no mode is active or env vars
+    // gate the tools, so this is a no-op for OSS-shell sessions.
+    let vertical_tools = crate::verticals::vertical_pack_tools();
+    if !vertical_tools.is_empty() {
+        let n = vertical_tools.len();
+        for t in vertical_tools {
+            tools.register(t);
+        }
+        eprintln!("[gamedev] {n} pack tool(s) registered (GUI chat)");
+    }
     // Apply `disallowed_tools` to the main agent's registry. Until
     // this was wired, the config field was parsed (config.rs maps
     // both flat `disallowedTools` and nested `permissions.deny`)
