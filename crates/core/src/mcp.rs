@@ -828,7 +828,7 @@ impl McpClient {
     /// `text/html;profile=mcp-app` before mounting an iframe and
     /// avoid trusting arbitrary text the server might return for the
     /// same URI.
-    pub async fn read_resource(&self, uri: &str) -> Result<(String, Option<String>)> {
+    pub async fn read_resource(&self, uri: &str) -> Result<(String, Option<String>, bool)> {
         let result = self
             .request("resources/read", json!({ "uri": uri }))
             .await?;
@@ -844,7 +844,19 @@ impl McpClient {
                     .get("mimeType")
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                return Ok((text.to_string(), mime));
+                // MCP-Apps extension carried in the resource's `_meta`.
+                // A trusted server that needs to load `<script src>`
+                // from its own preview origin (e.g. GamedevPreview
+                // returning an iframe whose src is the loopback HTTP
+                // server it spawned) sets `_meta.allowSameOrigin: true`.
+                // We surface it here; the trust gate at the call site
+                // decides whether to honor it.
+                let allow_same_origin = entry
+                    .get("_meta")
+                    .and_then(|m| m.get("allowSameOrigin"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                return Ok((text.to_string(), mime, allow_same_origin));
             }
         }
         Err(Error::Provider(format!(
@@ -1052,10 +1064,14 @@ impl Tool for McpTool {
             return None;
         }
         match self.client.read_resource(uri).await {
-            Ok((html, mime)) => Some(crate::tools::UiResource {
+            Ok((html, mime, allow_same_origin)) => Some(crate::tools::UiResource {
                 uri: uri.to_string(),
                 html,
                 mime,
+                // Honor the server's request — already gated by the
+                // trust check above. Untrusted servers never reach this
+                // arm so a third-party widget can never escalate.
+                allow_same_origin,
             }),
             Err(e) => {
                 eprintln!(
