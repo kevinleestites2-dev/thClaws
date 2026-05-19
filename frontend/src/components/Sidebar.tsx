@@ -428,8 +428,20 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
         action={
           <button
             className="p-0.5 rounded hover:bg-white/10"
-            title="New session (save current + clear)"
-            onClick={() => send({ type: "new_session" })}
+            title="New session (cancels active task + saves current + clears)"
+            onClick={() => {
+              // session_load / new_session are processed by the same
+              // single-threaded worker that runs agent turns; if a turn
+              // is in flight the swap message sits in the input queue
+              // until the turn finishes — issue #95(a): users expected
+              // the click to switch sessions immediately. Always fire
+              // shell_cancel first; it's idempotent on the backend
+              // (no-op when nothing is running) so it's safe to send
+              // even on an idle agent. Same reasoning as the Ctrl+C
+              // handler in TerminalView.tsx.
+              send({ type: "shell_cancel" });
+              send({ type: "new_session" });
+            }}
           >
             <Plus size={12} />
           </button>
@@ -474,7 +486,12 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
                     color: "var(--text-primary)",
                     fontWeight: isCurrent ? 600 : 400,
                   }}
-                  onClick={() => send({ type: "session_load", id: s.id })}
+                  onClick={() => {
+                    // See "New session" button comment above for why
+                    // shell_cancel goes first — issue #95(a).
+                    send({ type: "shell_cancel" });
+                    send({ type: "session_load", id: s.id });
+                  }}
                   title={s.title ? `${s.title} (${s.id}) — ${s.messages} msg${isCurrent ? " — current" : ""}` : `${s.id} — ${s.messages} msg${isCurrent ? " — current" : ""}`}
                 >
                   <span
