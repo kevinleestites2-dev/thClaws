@@ -37,7 +37,34 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// thClaws extension: opt the request into fire-and-forget + final
+    /// webhook callback. If present (and valid), the handler returns
+    /// 202 Accepted immediately and the run continues in the background;
+    /// when done, thClaws POSTs the final result to `x_callback.url`.
+    /// Absent ⇒ behaviour unchanged (sync or SSE per `stream`).
+    /// See `dev-plan/23-thclaws-async-callback.md`.
+    #[serde(default)]
+    pub x_callback: Option<XCallback>,
     // Unknown fields silently ignored (matches OpenAI tolerance).
+}
+
+/// Webhook delivery target carried in a chat-completions request body.
+/// All three fields are required when the extension is used; missing or
+/// empty values fail validation with 400.
+///
+/// thClaws is OPAQUE to `api_key` and `run_id` — it forwards them
+/// verbatim to the receiver (Authorization Bearer header + JSON body)
+/// and never inspects them. The receiver mints+verifies these on its
+/// side (the recommended pattern is a short-lived JWT with `run_id` in
+/// claims so spoofing one field invalidates the rest).
+#[derive(Deserialize, Clone, Debug)]
+pub struct XCallback {
+    pub url: String,
+    pub api_key: String,
+    pub run_id: String,
+    /// Optional explicit idempotency key. Defaults to `run_id` if absent.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -119,6 +146,13 @@ pub async fn chat_completions(
     _auth: AuthOk,
     Json(req): Json<ChatRequest>,
 ) -> Result<Response, Response> {
+    // Async + webhook callback path: fire-and-forget, deliver final
+    // result via POST to x_callback.url. Validation failures are the
+    // only sync error mode — anything past 202 lands on the callback.
+    if let Some(callback) = req.x_callback.clone() {
+        return chat_completions_async(req, callback).await;
+    }
+
     if req.stream {
         return chat_completions_stream(req).await;
     }
@@ -136,6 +170,77 @@ pub async fn chat_completions(
 
     let resp = build_chat_response(model, outcome);
     Ok(Json(resp).into_response())
+}
+
+/// Validate the `x_callback` envelope, spawn the agent run on a detached
+/// tokio task, return 202 immediately. The task delivers a single final
+/// POST to `callback.url` with the run outcome (see `super::callback`).
+async fn chat_completions_async(
+    req: ChatRequest,
+    callback: XCallback,
+) -> Result<Response, Response> {
+    let target = super::callback::CallbackTarget::from_request(&callback).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(OpenAiError::invalid_request(e, "invalid_x_callback")),
+        )
+            .into_response()
+    })?;
+
+    let model = req.model.clone();
+    let run_id = target.run_id.clone();
+    let started_at = chrono::Utc::now();
+
+    let target_for_task = target.clone();
+    let model_for_task = model.clone();
+    let run_id_for_task = run_id.clone();
+    // Spawn the agent loop on a detached task. If the task panics
+    // (which would be a thClaws bug, not user input — the agent path
+    // doesn't take untrusted closures), tokio's JoinError is the only
+    // signal we'd get; await it on a separate watcher task so we at
+    // least surface the failure to operators rather than silently
+    // dropping the callback.
+    let handle = tokio::spawn(async move {
+        let outcome = run_turn_from_messages(&req).await;
+        let payload = super::callback::CallbackPayload::from_outcome(
+            &run_id_for_task,
+            &model_for_task,
+            started_at,
+            outcome,
+        );
+        super::callback::deliver(&target_for_task, &payload).await;
+    });
+    let watch_run_id = run_id.clone();
+    let watch_target = target.clone();
+    tokio::spawn(async move {
+        match handle.await {
+            Ok(()) => {}
+            Err(join_err) if join_err.is_panic() => {
+                eprintln!(
+                    "[api_v1] callback_failed run_id={} reason=task_panicked",
+                    watch_run_id
+                );
+                // Best-effort: tell the receiver the run died so it
+                // doesn't hang forever waiting for a callback.
+                let payload =
+                    super::callback::CallbackPayload::panic_payload(&watch_run_id, started_at);
+                super::callback::deliver(&watch_target, &payload).await;
+            }
+            Err(join_err) => {
+                eprintln!(
+                    "[api_v1] callback_failed run_id={} reason=task_cancelled error=\"{join_err}\"",
+                    watch_run_id
+                );
+            }
+        }
+    });
+
+    let body = serde_json::json!({
+        "run_id": run_id,
+        "status": "accepted",
+        "model": model,
+    });
+    Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
 
 /// SSE response: emit OpenAI chat.completion.chunk events as the agent

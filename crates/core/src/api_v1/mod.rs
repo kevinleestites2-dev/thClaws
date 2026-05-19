@@ -17,6 +17,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 
+pub mod callback;
 pub mod chat;
 pub mod errors;
 pub mod models;

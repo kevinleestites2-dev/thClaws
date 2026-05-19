@@ -281,6 +281,187 @@ Settings → Models → Override OpenAI Base URL = `http://localhost:7878/v1`,
 API Key = your `THCLAWS_API_TOKEN`. Models in the dropdown match what
 `/v1/models` returns.
 
+## Async mode (`x_callback` extension)
+
+For agentic loops that run minutes or hours, holding an SSE connection
+open is a poor fit — proxies idle-timeout, the client process may die,
+and a single dropped chunk wastes everything done so far. thClaws
+ships an OpenAI-style request extension that opts an individual call
+into **fire-and-forget + final webhook delivery**: thClaws ACKs with
+202 Accepted, runs the agentic loop in the background, and delivers
+the terminal result with one HTTP POST to a URL the client supplied.
+
+The wire format is backward-compatible. Clients that don't know about
+`x_callback` (Cursor, Aider, openai-python, LiteLLM, Cline) never
+trigger the async path. Any client that wants async opts in per-call.
+
+### Request shape
+
+Send a standard `/v1/chat/completions` body with an extra `x_callback`
+object:
+
+```http
+POST /v1/chat/completions
+Authorization: Bearer <THCLAWS_API_TOKEN>
+Content-Type: application/json
+
+{
+  "model": "claude-sonnet-4-6",
+  "messages": [{"role": "user", "content": "..."}],
+  "x_callback": {
+    "url":     "https://my-orchestrator.example.com/webhooks/thclaws",
+    "api_key": "<bearer the receiver will verify>",
+    "run_id":  "<correlation id echoed back in the callback body>",
+    "idempotency_key": "<optional; defaults to run_id>"
+  }
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `url` | string | yes | http or https. thClaws POSTs the terminal result here. |
+| `api_key` | string | yes | thClaws sends `Authorization: Bearer <api_key>` on the callback. Opaque to thClaws — the receiver verifies. |
+| `run_id` | string | yes | Echoed verbatim in the callback body. Correlation id for the receiver. |
+| `idempotency_key` | string | no | Sent as `Idempotency-Key` header on the callback POST. Defaults to `run_id`. |
+
+The `stream` flag in the body is **ignored** when `x_callback` is set —
+the call always goes async.
+
+### Response: 202 Accepted
+
+```json
+{
+  "run_id": "<the run_id you sent>",
+  "status": "accepted",
+  "model": "<resolved model id>"
+}
+```
+
+The only sync error mode is 400 Bad Request on validation failure
+(missing required field, malformed URL, non-http scheme). Once you see
+202, the next signal you get is the callback POST.
+
+### Callback POST shape
+
+When the agent run terminates (success / error / cancel), thClaws POSTs
+once to `x_callback.url`:
+
+```http
+POST <x_callback.url>
+Authorization: Bearer <x_callback.api_key>
+Content-Type: application/json
+Idempotency-Key: <x_callback.idempotency_key OR x_callback.run_id>
+User-Agent: thclaws/<version>
+
+{
+  "run_id":        "<x_callback.run_id>",
+  "status":        "succeeded" | "failed" | "cancelled",
+  "finish_reason": "stop" | "length" | "tool_calls" | "error",
+  "model":         "<resolved model>",
+  "summary":       "<final assistant text, may be empty for tool-only outcomes>",
+  "usage": {
+    "prompt_tokens":     <n>,
+    "completion_tokens": <n>,
+    "total_tokens":      <n>
+  },
+  "tool_calls":   ["Read", "Bash", ...],
+  "tool_denials": [],
+  "iterations":   <n>,
+  "error":        null | { "code": "<thclaws error code>", "message": "..." },
+  "started_at":   "<ISO8601>",
+  "completed_at": "<ISO8601>"
+}
+```
+
+Detailed per-event tool-use payloads (input blobs, output previews) are
+intentionally omitted from the terminal callback — they're available
+on the synchronous SSE path. The async payload is a summary, not a
+transcript.
+
+### Retry policy
+
+thClaws retries the callback up to **3 times** at `t=0s`, `t=10s`,
+`t=60s`, hard-capped at 90 seconds wall-clock. Retry triggers:
+
+- 5xx response
+- 429 response
+- Any network / transport error
+
+Gives-up triggers (1 attempt only):
+
+- 4xx other than 429
+- Successful 2xx response
+
+After exhaustion, thClaws logs `event=callback_failed` and drops the
+run. The receiver is responsible for reconciliation — typically via a
+"silent run" timeout sweep that flags runs whose callback never landed.
+
+### Authentication
+
+- The **inbound** `/v1/chat/completions` is authenticated by
+  `THCLAWS_API_TOKEN` as usual.
+- The **outbound** callback uses whatever `x_callback.api_key` the
+  client supplied. thClaws never inspects it.
+- Recommended receiver pattern: mint a **short-lived JWT** with
+  `run_id` baked into the claims and verify both signature and
+  `run_id`-vs-path on the callback handler. A leaked token then can't
+  forge a completion for a different run.
+
+### Telemetry
+
+Each async run emits these structured log events to stderr:
+
+| Event | When |
+|---|---|
+| `callback_accepted` | 202 returned, async task spawned |
+| `callback_delivered` | A retry attempt got a 2xx — done |
+| `callback_retried` | A retry attempt failed; another is scheduled |
+| `callback_failed` | All retries exhausted, run dropped |
+
+### When to use async mode
+
+Use `x_callback` when:
+
+- The run is expected to take **>5 minutes** (agentic loops, multi-tool
+  workflows, long builds)
+- The client can't reliably hold an SSE connection (Lambda, GitHub
+  Actions step, cron job, Slack bot)
+- You're integrating with a webhook-style automation tool (n8n, Zapier,
+  Make.com)
+- You want **decoupled lifetimes** between client and run (client may
+  restart while run continues)
+
+Stay on the sync SSE path (no `x_callback`) when:
+
+- The user is watching token-by-token output (chat UIs)
+- The run is fast (<60s) and you want the result inline
+- You don't have a public HTTP endpoint to receive a callback
+
+### Worked example (curl)
+
+```sh
+# Terminal 1: stand up a one-shot callback receiver
+nc -l 8901 &
+
+# Terminal 2: dispatch async
+curl -sS -X POST http://localhost:7878/v1/chat/completions \
+  -H "Authorization: Bearer $THCLAWS_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-haiku-4-5",
+    "messages": [{"role": "user", "content": "list 3 files in /tmp"}],
+    "x_callback": {
+      "url":     "http://localhost:8901/cb",
+      "api_key": "test-receiver-secret",
+      "run_id":  "demo-run-001"
+    }
+  }'
+# → 202 with { "run_id": "demo-run-001", "status": "accepted", ... }
+```
+
+A minute or two later (depending on the model), the netcat listener
+prints the terminal callback POST.
+
 ## Limits and non-goals
 
 This is **Chat Completions only** — by design.
