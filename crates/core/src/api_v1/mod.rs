@@ -21,6 +21,7 @@ pub mod agent;
 pub mod callback;
 pub mod chat;
 pub mod errors;
+pub mod info;
 pub mod models;
 
 /// Build the `/v1/*` sub-router. Mounted into the main server router
@@ -32,11 +33,15 @@ pub mod models;
 /// - `POST /agent/run`            — thClaws-native agent endpoint with
 ///   per-request `workspace_dir` for skill / MCP / plugin scoping
 ///   (see `dev-plan/25-thclaws-as-agent.md`).
+/// - `GET  /v1/agent/info`        — read-only capability snapshot for
+///   orchestrators that treat this daemon as a sovereign freelancer
+///   (see `dev-plan/26-thclaws-pod-as-freelancer.md`).
 pub fn router() -> Router {
     Router::new()
         .route("/v1/models", get(models::list_models))
         .route("/v1/chat/completions", post(chat::chat_completions))
         .route("/agent/run", post(agent::agent_run))
+        .route("/v1/agent/info", get(info::get_info))
 }
 
 /// Bearer-token extractor enforcing [`auth_token`] policy. Returned by
