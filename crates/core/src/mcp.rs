@@ -1619,7 +1619,7 @@ mod tests {
             .await;
         });
 
-        let (text, mime) = client
+        let (text, mime, allow_same_origin) = client
             .read_resource("ui://pinn/image-viewer")
             .await
             .expect("read_resource");
@@ -1628,6 +1628,53 @@ mod tests {
 
         assert_eq!(text, "<html>widget</html>");
         assert_eq!(mime.as_deref(), Some("text/html;profile=mcp-app"));
+        // Default — server didn't set `_meta.allowSameOrigin`. The
+        // strict sandbox stays on; this is the safety-by-default that
+        // the allow-same-origin opt-in is layered against.
+        assert!(!allow_same_origin);
+    }
+
+    #[tokio::test]
+    async fn read_resource_propagates_allow_same_origin_when_meta_set() {
+        let (client, (s_read, s_write)) = paired_streams();
+
+        let server_task = tokio::spawn(async move {
+            run_mock_server(s_read, s_write, move |msg| {
+                let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+                let id = msg.get("id").and_then(Value::as_u64);
+                match (method, id) {
+                    ("resources/read", Some(id)) => {
+                        let uri = msg
+                            .get("params")
+                            .and_then(|p| p.get("uri"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        Some(jsonrpc_response(
+                            id,
+                            json!({
+                                "contents": [{
+                                    "uri": uri,
+                                    "mimeType": "text/html;profile=mcp-app",
+                                    "text": "<html>widget</html>",
+                                    "_meta": { "allowSameOrigin": true }
+                                }]
+                            }),
+                        ))
+                    }
+                    _ => None,
+                }
+            })
+            .await;
+        });
+
+        let (_text, _mime, allow_same_origin) = client
+            .read_resource("ui://pinn/preview")
+            .await
+            .expect("read_resource");
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_task).await;
+
+        assert!(allow_same_origin);
     }
 
     #[tokio::test]
