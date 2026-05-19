@@ -22,6 +22,7 @@ import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
 } from "@paperclipai/adapter-utils";
+import { acquireAgentLock } from "./agent-mutex.js";
 import { runAgentRun, type XCallback } from "./http-client.js";
 import {
   extractMaterializeInput,
@@ -126,13 +127,19 @@ export async function execute(
     },
   });
 
-  // Materialize BEFORE spawn. The materializer is fast (a few file
-  // writes); doing it first means the daemon — once up — picks up the
-  // freshly-written .thclaws/skills/ on its scan during /agent/run.
+  // Per-agent mutex (dev-plan/25 Phase D): serializes the
+  // materialize → POST window so a second concurrent run of the same
+  // agent doesn't overwrite skills the first run is about to read.
+  // thcompany's withAgentStartLock + maxConcurrentRuns provides the
+  // primary serialization; this is defense in depth for the in-process
+  // adapter boundary.
+  const releaseAgentLock = await acquireAgentLock(ctx.agent.id);
+
   let materialized;
   try {
     materialized = await materializeAgentWorkspace(materializeInput);
   } catch (e) {
+    releaseAgentLock();
     const msg = e instanceof Error ? e.message : String(e);
     return {
       exitCode: 1,
@@ -157,6 +164,7 @@ export async function execute(
   try {
     endpoint = await getLocalThclawsEndpoint({ command, cwd, env: envOverrides });
   } catch (e) {
+    releaseAgentLock();
     const msg = e instanceof Error ? e.message : String(e);
     return {
       exitCode: 1,
@@ -169,20 +177,25 @@ export async function execute(
     };
   }
 
-  const result = await runAgentRun({
-    baseUrl: endpoint.baseUrl,
-    bearerToken: endpoint.bearerToken,
-    workspaceDir: materializeInput.workspaceDir,
-    prompt: userPrompt,
-    model,
-    systemPrompt,
-    sessionId,
-    temperature,
-    maxTokens,
-    onLogStdout: (chunk) => ctx.onLog("stdout", chunk),
-    onLogStderr: (chunk) => ctx.onLog("stderr", chunk),
-    ...(xCallback ? { xCallback } : {}),
-  });
+  let result;
+  try {
+    result = await runAgentRun({
+      baseUrl: endpoint.baseUrl,
+      bearerToken: endpoint.bearerToken,
+      workspaceDir: materializeInput.workspaceDir,
+      prompt: userPrompt,
+      model,
+      systemPrompt,
+      sessionId,
+      temperature,
+      maxTokens,
+      onLogStdout: (chunk) => ctx.onLog("stdout", chunk),
+      onLogStderr: (chunk) => ctx.onLog("stderr", chunk),
+      ...(xCallback ? { xCallback } : {}),
+    });
+  } finally {
+    releaseAgentLock();
+  }
 
   if (result.asyncAccepted) {
     await ctx.onLog(
