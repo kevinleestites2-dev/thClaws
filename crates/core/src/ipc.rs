@@ -2291,20 +2291,23 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         // Sandbox-checked; refuses to clobber an existing path.
         "file_mkdir" => {
             let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let (ok, error): (bool, Option<String>) =
-                match crate::sandbox::Sandbox::check(raw_path) {
-                    Ok(path) => {
-                        if path.exists() {
-                            (false, Some("a file or folder with that name already exists".into()))
-                        } else {
-                            match std::fs::create_dir_all(&path) {
-                                Ok(()) => (true, None),
-                                Err(e) => (false, Some(format!("mkdir: {e}"))),
-                            }
+            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
+            {
+                Ok(path) => {
+                    if path.exists() {
+                        (
+                            false,
+                            Some("a file or folder with that name already exists".into()),
+                        )
+                    } else {
+                        match std::fs::create_dir_all(&path) {
+                            Ok(()) => (true, None),
+                            Err(e) => (false, Some(format!("mkdir: {e}"))),
                         }
                     }
-                    Err(e) => (false, Some(format!("access denied: {e}"))),
-                };
+                }
+                Err(e) => (false, Some(format!("access denied: {e}"))),
+            };
             (ctx.dispatch)(
                 serde_json::json!({
                     "type": "file_mkdir_result",
@@ -2321,33 +2324,31 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         // `create_new` (atomic exists-check).
         "file_create" => {
             let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let (ok, error): (bool, Option<String>) =
-                match crate::sandbox::Sandbox::check(raw_path) {
-                    Ok(path) => {
-                        let parent_made = match path.parent() {
-                            Some(parent) => std::fs::create_dir_all(parent)
-                                .map_err(|e| format!("mkdir parent: {e}")),
-                            None => Ok(()),
-                        };
-                        match parent_made {
-                            Err(e) => (false, Some(e)),
-                            Ok(()) => match std::fs::OpenOptions::new()
-                                .write(true)
-                                .create_new(true)
-                                .open(&path)
-                            {
-                                Ok(_) => (true, None),
-                                Err(e)
-                                    if e.kind() == std::io::ErrorKind::AlreadyExists =>
-                                {
-                                    (false, Some("a file with that name already exists".into()))
-                                }
-                                Err(e) => (false, Some(format!("create: {e}"))),
-                            },
-                        }
+            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
+            {
+                Ok(path) => {
+                    let parent_made = match path.parent() {
+                        Some(parent) => std::fs::create_dir_all(parent)
+                            .map_err(|e| format!("mkdir parent: {e}")),
+                        None => Ok(()),
+                    };
+                    match parent_made {
+                        Err(e) => (false, Some(e)),
+                        Ok(()) => match std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)
+                        {
+                            Ok(_) => (true, None),
+                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                                (false, Some("a file with that name already exists".into()))
+                            }
+                            Err(e) => (false, Some(format!("create: {e}"))),
+                        },
                     }
-                    Err(e) => (false, Some(format!("access denied: {e}"))),
-                };
+                }
+                Err(e) => (false, Some(format!("access denied: {e}"))),
+            };
             (ctx.dispatch)(
                 serde_json::json!({
                     "type": "file_create_result",

@@ -1506,9 +1506,8 @@ pub fn rename_page(kref: &KmsRef, old_name: &str, new_name: &str) -> Result<Path
     if !index.is_empty() {
         let rewritten = rewrite_merge_links(&index, &page_renames, &source_renames);
         if rewritten != index {
-            std::fs::write(kref.index_path(), rewritten.as_bytes()).map_err(|e| {
-                Error::Tool(format!("write {}: {e}", kref.index_path().display()))
-            })?;
+            std::fs::write(kref.index_path(), rewritten.as_bytes())
+                .map_err(|e| Error::Tool(format!("write {}: {e}", kref.index_path().display())))?;
         }
     }
 
