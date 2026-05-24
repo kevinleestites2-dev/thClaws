@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-05-24
+
+Two contributor-driven fixes: accurate Anthropic token/cost accounting,
+and a remote-MCP `/mcp add` that no longer hangs (with API-key header
+support).
+
+### Added
+
+- **`--header` on `/mcp add`** (part of
+  [#118](https://github.com/thClaws/thClaws/pull/118)).
+  `/mcp add <name> <url> --header "Key: Value"` — repeatable, `-H`
+  alias. Values support `${VAR}` interpolation resolved from the
+  environment at connect time, so an API key lives in your shell /
+  `.env` rather than plaintext in `mcp.json`:
+  ```
+  /mcp add financial-datasets https://mcp.financialdatasets.ai/api --header "X-API-KEY: ${FD_KEY}"
+  ```
+
+### Fixed
+
+- **Anthropic token usage + prompt-cache accounting**
+  ([#115](https://github.com/thClaws/thClaws/pull/115),
+  [@ultramcu](https://github.com/ultramcu)). The streaming parser read
+  usage only from `message_delta` (which carries just `output_tokens`)
+  and dropped `message_start.message.usage`, so every Anthropic turn
+  reported `input_tokens = 0` and no cache stats — making `/cost` and
+  the Cardputer cost display undercount the flagship provider. Now
+  merges `message_start` usage into the terminal result (terminal
+  `output_tokens` wins; cache fields preserved).
+
+- **Remote MCP `/mcp add` no longer hangs; supports API-key auth**
+  ([#114](https://github.com/thClaws/thClaws/issues/114),
+  [@ultramcu](https://github.com/ultramcu);
+  [#118](https://github.com/thClaws/thClaws/pull/118)). Adding an
+  OAuth-gated remote server (e.g. financial-datasets' root URL) froze
+  `/mcp add` for up to 5 minutes: the command ran the full connect
+  inline, hit a 401, and blocked on the OAuth browser callback. Four
+  fixes:
+  - `--header` lets you use the API-key endpoint (`/api` + `X-API-KEY`)
+    and skip OAuth entirely (see Added).
+  - The auth probe and `oauth::discover` now have hard timeouts (15s
+    request / 10s connect) so a stalled server can't hang the command
+    or a startup spawn indefinitely.
+  - `/mcp add` connects **non-interactively**: a server that needs
+    OAuth returns "run `/mcp reauth <name>`" instead of blocking on a
+    browser callback. The guard covers both the upfront probe and the
+    bridge's `initialize`-time 401. Startup / `/mcp reauth` stay
+    interactive (browser flow runs in the background as before).
+
+### Default model — no change
+
+Default stays `claude-sonnet-4-6`.
+
 ## [0.16.1] — 2026-05-24
 
 Hotfix. macOS startup crash for every GUI / `--serve` user.
