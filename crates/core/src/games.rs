@@ -76,18 +76,32 @@ pub fn render_games_list() -> String {
     out
 }
 
+/// Outcome of a successful `/game` dispatch: the qualified MCP tool
+/// name that produced the iframe (the GUI passes this through as the
+/// `name` field on the synthetic ToolCallStart/Result events so the
+/// frontend's McpAppIframe can derive the right serverPrefix for
+/// widget→host tool calls), the tool's text output, and the resolved
+/// UI resource (when the server is trusted).
+#[derive(Debug)]
+pub struct PlayOutcome {
+    pub qualified_tool_name: String,
+    pub output: String,
+    pub ui_resource: Option<UiResource>,
+}
+
 /// Look up the gamedev-mcp `GamedevPlayReference` tool in `registry`
 /// (qualified name = `<sanitized_server>__GamedevPlayReference`) and
-/// invoke it for `display_name`. Returns `(text_output, ui_resource)`
-/// so the GUI dispatcher can emit a synthetic ToolCallResult event with
-/// the iframe widget attached, and the CLI can print just the text.
+/// invoke it for `display_name`. Returns a [`PlayOutcome`] so the GUI
+/// dispatcher can emit a synthetic ToolCallResult event with both the
+/// iframe widget and the qualified name attached, and the CLI can
+/// print just the text.
 ///
 /// Errors are user-facing: unknown game name, MCP not connected,
 /// gamedev-mcp's own tool error (game not found in references, etc.).
 pub async fn play(
     registry: &ToolRegistry,
     display_name: &str,
-) -> Result<(String, Option<UiResource>)> {
+) -> Result<PlayOutcome> {
     let game = CURATED_GAMES
         .iter()
         .find(|g| g.display_name.eq_ignore_ascii_case(display_name))
@@ -133,7 +147,11 @@ pub async fn play(
     let args = serde_json::json!({ "name": game.reference_id });
     let output = tool.call(args).await?;
     let ui_resource = tool.fetch_ui_resource().await;
-    Ok((output, ui_resource))
+    Ok(PlayOutcome {
+        qualified_tool_name: qualified,
+        output,
+        ui_resource,
+    })
 }
 
 #[cfg(test)]

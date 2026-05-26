@@ -8742,8 +8742,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         );
                     } else {
                         match crate::games::play(&agent.tools, name).await {
-                            Ok((output, _ui_resource)) => {
-                                println!("{output}");
+                            Ok(outcome) => {
+                                println!("{}", outcome.output);
                                 println!(
                                     "{COLOR_DIM}(open the GUI to view the game iframe — the CLI cannot render the widget){COLOR_RESET}"
                                 );

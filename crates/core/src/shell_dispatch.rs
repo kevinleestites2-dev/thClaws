@@ -3227,23 +3227,34 @@ pub async fn dispatch(
                 );
             } else {
                 match crate::games::play(&state.agent.tools, name).await {
-                    Ok((output, ui_resource)) => {
+                    Ok(outcome) => {
                         // Synthesize the same ToolCallStart + ToolCallResult
                         // pair the agent loop emits when the model calls
                         // GamedevPlayReference itself — that's the only
                         // event shape ChatView understands for mounting
                         // an inline MCP-Apps iframe widget alongside a
                         // labeled tool bubble.
+                        //
+                        // Use the QUALIFIED MCP name (e.g.
+                        // `gamedev__GamedevPlayReference`) — McpAppIframe
+                        // derives `serverPrefix` from the substring
+                        // before `__` and uses it to resolve later
+                        // widget→host `app.callServerTool('GamedevAiMove')`
+                        // calls to `gamedev__GamedevAiMove`. Passing the
+                        // bare name would leave serverPrefix empty and
+                        // every in-game thClaws-AI call would 404, with
+                        // the game silently falling back to its built-in
+                        // Classic AI.
                         let label = format!("Play: {name}");
                         let _ = events_tx.send(ViewEvent::ToolCallStart {
-                            name: "GamedevPlayReference".into(),
+                            name: outcome.qualified_tool_name.clone(),
                             label,
                             input: serde_json::json!({ "name": name }),
                         });
                         let _ = events_tx.send(ViewEvent::ToolCallResult {
-                            name: "GamedevPlayReference".into(),
-                            output,
-                            ui_resource,
+                            name: outcome.qualified_tool_name,
+                            output: outcome.output,
+                            ui_resource: outcome.ui_resource,
                         });
                     }
                     Err(e) => emit(events_tx, format!("/game error: {e}")),
