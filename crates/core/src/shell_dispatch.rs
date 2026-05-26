@@ -3236,23 +3236,31 @@ pub async fn dispatch(
                         // labeled tool bubble.
                         //
                         // Use the QUALIFIED MCP name (e.g.
-                        // `gamedev__GamedevPlayReference`) — McpAppIframe
-                        // derives `serverPrefix` from the substring
-                        // before `__` and uses it to resolve later
-                        // widget→host `app.callServerTool('GamedevAiMove')`
-                        // calls to `gamedev__GamedevAiMove`. Passing the
-                        // bare name would leave serverPrefix empty and
-                        // every in-game thClaws-AI call would 404, with
-                        // the game silently falling back to its built-in
-                        // Classic AI.
-                        let label = format!("Play: {name}");
+                        // `gamedev__GamedevPlayReference`) for BOTH the
+                        // `name` and `label` fields. McpAppIframe reads
+                        // its `parentToolName` from `msg.toolName` in
+                        // ChatView, which the IPC builds from the label
+                        // (event_render maps `label → "name"` on the
+                        // wire). So the label has to carry the `__`
+                        // separator — `serverPrefix` is derived by
+                        // splitting `parentToolName` on `__`. A pretty
+                        // label like "Play: Othello" would leave
+                        // serverPrefix empty and every in-game
+                        // `app.callServerTool('GamedevAiMove')` would
+                        // 404, silently falling back to ClassicAI.
+                        // Mirror what the agent-driven path does:
+                        // format_tool_label returns the qualified name
+                        // unchanged for MCP tools, so the chat bubble
+                        // already shows `gamedev__GamedevPlayReference`
+                        // when the model calls the tool itself.
+                        let qualified = outcome.qualified_tool_name;
                         let _ = events_tx.send(ViewEvent::ToolCallStart {
-                            name: outcome.qualified_tool_name.clone(),
-                            label,
+                            name: qualified.clone(),
+                            label: qualified.clone(),
                             input: serde_json::json!({ "name": name }),
                         });
                         let _ = events_tx.send(ViewEvent::ToolCallResult {
-                            name: outcome.qualified_tool_name,
+                            name: qualified,
                             output: outcome.output,
                             ui_resource: outcome.ui_resource,
                         });
