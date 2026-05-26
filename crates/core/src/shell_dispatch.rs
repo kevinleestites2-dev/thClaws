@@ -3215,6 +3215,41 @@ pub async fn dispatch(
                 )));
             });
         }
+        SlashCommand::Games => {
+            emit(events_tx, crate::games::render_games_list());
+        }
+        SlashCommand::Game(name) => {
+            let name = name.trim();
+            if name.is_empty() {
+                emit(
+                    events_tx,
+                    "usage: /game <name>   (try /games for the list)".into(),
+                );
+            } else {
+                match crate::games::play(&state.agent.tools, name).await {
+                    Ok((output, ui_resource)) => {
+                        // Synthesize the same ToolCallStart + ToolCallResult
+                        // pair the agent loop emits when the model calls
+                        // GamedevPlayReference itself — that's the only
+                        // event shape ChatView understands for mounting
+                        // an inline MCP-Apps iframe widget alongside a
+                        // labeled tool bubble.
+                        let label = format!("Play: {name}");
+                        let _ = events_tx.send(ViewEvent::ToolCallStart {
+                            name: "GamedevPlayReference".into(),
+                            label,
+                            input: serde_json::json!({ "name": name }),
+                        });
+                        let _ = events_tx.send(ViewEvent::ToolCallResult {
+                            name: "GamedevPlayReference".into(),
+                            output,
+                            ui_resource,
+                        });
+                    }
+                    Err(e) => emit(events_tx, format!("/game error: {e}")),
+                }
+            }
+        }
         SlashCommand::Unknown(detail) => {
             emit(events_tx, format!("unknown command: {detail}"));
         }

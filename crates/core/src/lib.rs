@@ -45,6 +45,7 @@ pub mod event_render;
 pub mod external_url;
 #[cfg(feature = "gui")]
 pub mod file_preview;
+pub mod games;
 pub mod goal_state;
 #[cfg(feature = "gui")]
 pub mod gui;

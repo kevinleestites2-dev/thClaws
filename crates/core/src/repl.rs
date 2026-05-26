@@ -684,6 +684,13 @@ pub enum SlashCommand {
         allow_stdio_mcp: bool,
         restart: bool,
     },
+    /// `/games` — show the curated list of playable reference games.
+    /// Pure read-only; output rendered by `crate::games::render_games_list`.
+    Games,
+    /// `/game <name>` — play one of the curated reference games inline.
+    /// Carries the user-supplied name verbatim; resolution + MCP call
+    /// happens in the dispatcher via `crate::games::play`.
+    Game(String),
     Unknown(String),
 }
 
@@ -1523,6 +1530,8 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         }
         "permissions" | "perms" => SlashCommand::Permissions(args.to_string()),
         "plan" => SlashCommand::Plan(args.trim().to_string()),
+        "games" => SlashCommand::Games,
+        "game" => SlashCommand::Game(args.trim().to_string()),
         "team" => SlashCommand::Team,
         "usage" => SlashCommand::Usage,
         "memory" => parse_memory_subcommand(args),
@@ -3034,6 +3043,8 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "cost",     description: "Show or reset accumulated session cost",     category: "System", usage: "[reset]" },
         BuiltInCommand { name: "doctor",   description: "Run diagnostics",                            category: "System", usage: "" },
         BuiltInCommand { name: "config",   description: "Set a config value (session-only)",          category: "System", usage: "key=value" },
+        BuiltInCommand { name: "games",    description: "List playable reference games",              category: "Games",  usage: "" },
+        BuiltInCommand { name: "game",     description: "Play a reference game (read-only)",          category: "Games",  usage: "<name>" },
         BuiltInCommand { name: "quit",     description: "Exit",                                       category: "System", usage: "" },
     ]
 }
@@ -8719,6 +8730,29 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         restart,
                     };
                     let _ = crate::deploy_client::run(args).await;
+                }
+                SlashCommand::Games => {
+                    println!("{}", crate::games::render_games_list());
+                }
+                SlashCommand::Game(name) => {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        println!(
+                            "{COLOR_YELLOW}usage: /game <name>   (try /games for the list){COLOR_RESET}"
+                        );
+                    } else {
+                        match crate::games::play(&agent.tools, name).await {
+                            Ok((output, _ui_resource)) => {
+                                println!("{output}");
+                                println!(
+                                    "{COLOR_DIM}(open the GUI to view the game iframe — the CLI cannot render the widget){COLOR_RESET}"
+                                );
+                            }
+                            Err(e) => {
+                                println!("{COLOR_YELLOW}/game error: {e}{COLOR_RESET}");
+                            }
+                        }
+                    }
                 }
                 SlashCommand::Unknown(what) => {
                     println!("{COLOR_YELLOW}unknown command: {what}{COLOR_RESET}");
