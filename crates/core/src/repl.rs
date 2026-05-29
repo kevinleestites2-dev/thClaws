@@ -3045,6 +3045,7 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "config",   description: "Set a config value (session-only)",          category: "System", usage: "key=value" },
         BuiltInCommand { name: "games",    description: "List playable reference games",              category: "Games",  usage: "" },
         BuiltInCommand { name: "game",     description: "Play a reference game (read-only)",          category: "Games",  usage: "<name>" },
+        BuiltInCommand { name: "quiz",     description: "Generate & play a study quiz from a URL, file, or topic", category: "Games", usage: "<topic|url|file>" },
         BuiltInCommand { name: "quit",     description: "Exit",                                       category: "System", usage: "" },
     ]
 }
