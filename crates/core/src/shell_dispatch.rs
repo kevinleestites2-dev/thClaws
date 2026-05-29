@@ -3216,6 +3216,13 @@ pub async fn dispatch(
                 )));
             });
         }
+        SlashCommand::WorkflowRun(_) => {
+            emit(
+                events_tx,
+                "/workflow run is REPL-only in Tier 1 — the author phase needs an interactive review surface. GUI worker grid lands in Stage E."
+                    .to_string(),
+            );
+        }
         SlashCommand::Unknown(detail) => {
             emit(events_tx, format!("unknown command: {detail}"));
         }

@@ -684,6 +684,12 @@ pub enum SlashCommand {
         allow_stdio_mcp: bool,
         restart: bool,
     },
+    /// dev-plan/32 Stage B: author + run a deterministic workflow
+    /// script for the given goal. The model writes a JS file using the
+    /// `thclaws.*` API; the REPL shows it for review; on approve, Boa
+    /// executes it and prints the script's final value. The arg is the
+    /// raw user goal — everything after `/workflow run`.
+    WorkflowRun(String),
     Unknown(String),
 }
 
@@ -818,6 +824,32 @@ fn parse_plugin_subcommand(cmd: &str, args: &str) -> SlashCommand {
 /// Bare `/schedule` lists. `add` is intentionally not supported as a
 /// slash command — multi-line prompt + cron + flags doesn't fit a
 /// REPL line cleanly; users go to `thclaws schedule add` for that.
+/// dev-plan/32 Stage B. Only `run` is wired so far; `list` / `inspect`
+/// / `rm` land in Tier 2 alongside resume support.
+fn parse_workflow_subcommand(args: &str) -> SlashCommand {
+    let args = args.trim();
+    let (sub, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    let rest = rest.trim();
+    match sub {
+        "run" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown(
+                    "usage: /workflow run <goal> — describe what the workflow should accomplish"
+                        .to_string(),
+                )
+            } else {
+                SlashCommand::WorkflowRun(rest.to_string())
+            }
+        }
+        "" => SlashCommand::Unknown(
+            "usage: /workflow run <goal>  (Tier 1 — list/inspect/rm land in Tier 2)".to_string(),
+        ),
+        _ => SlashCommand::Unknown(format!(
+            "unknown workflow subcommand: '{sub}' (Tier 1 only ships /workflow run)"
+        )),
+    }
+}
+
 fn parse_schedule_subcommand(args: &str) -> SlashCommand {
     let args = args.trim();
     if args.is_empty() || args == "list" || args == "ls" {
@@ -1530,6 +1562,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         "loop" => parse_loop_subcommand(args),
         "goal" => parse_goal_subcommand(args),
         "schedule" | "sched" => parse_schedule_subcommand(args),
+        "workflow" | "wf" => parse_workflow_subcommand(args),
         "agent" => parse_agent_subcommand(args),
         "agents" => SlashCommand::AgentsList,
         "deploy" => parse_deploy_subcommand(args),
@@ -8792,6 +8825,163 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         restart,
                     };
                     let _ = crate::deploy_client::run(args).await;
+                }
+                SlashCommand::WorkflowRun(prompt) => {
+                    let prompt = prompt.trim();
+                    if prompt.is_empty() {
+                        println!("{COLOR_YELLOW}/workflow run: missing goal{COLOR_RESET}");
+                        continue;
+                    }
+                    let provider = match crate::repl::build_provider(&config) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow run: can't build provider: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let mut revision_note: Option<String> = None;
+                    let approved_script: Option<String> = loop {
+                        println!(
+                            "{COLOR_DIM}/workflow run: authoring script (model={})…{COLOR_RESET}",
+                            config.model
+                        );
+                        let script = match crate::workflow::author(
+                            provider.as_ref(),
+                            &config.model,
+                            prompt,
+                            revision_note.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(s) => s,
+                            Err(e) => {
+                                println!(
+                                    "{COLOR_YELLOW}/workflow run: author failed: {e}{COLOR_RESET}"
+                                );
+                                break None;
+                            }
+                        };
+                        println!("{COLOR_DIM}────────── script ──────────{COLOR_RESET}");
+                        for (i, src_line) in script.lines().enumerate() {
+                            println!(
+                                "{COLOR_DIM}{:>3}{COLOR_RESET}  {src_line}",
+                                i + 1
+                            );
+                        }
+                        println!("{COLOR_DIM}────────────────────────────{COLOR_RESET}");
+                        print!(
+                            "{COLOR_DIM}[a]pprove · [c]ancel · [r]e-author: {COLOR_RESET}"
+                        );
+                        use std::io::{BufRead as _, Write as _};
+                        let _ = std::io::stdout().flush();
+                        let mut input = String::new();
+                        if std::io::stdin().lock().read_line(&mut input).is_err() {
+                            break None;
+                        }
+                        match input.trim().chars().next() {
+                            Some('c') | Some('C') => {
+                                println!("{COLOR_DIM}/workflow run: cancelled{COLOR_RESET}");
+                                break None;
+                            }
+                            Some('r') | Some('R') => {
+                                print!(
+                                    "{COLOR_DIM}revision note (one line): {COLOR_RESET}"
+                                );
+                                let _ = std::io::stdout().flush();
+                                let mut note = String::new();
+                                if std::io::stdin().lock().read_line(&mut note).is_err() {
+                                    break None;
+                                }
+                                revision_note = Some(note.trim().to_string());
+                                continue;
+                            }
+                            _ => break Some(script),
+                        }
+                    };
+
+                    if let Some(script) = approved_script {
+                        // Stage D: open a state.jsonl logger for this
+                        // run. Failure to create one is non-fatal — we
+                        // print a warning and proceed without
+                        // checkpointing, so a read-only / undeployable
+                        // .thclaws/ dir doesn't block /workflow run.
+                        let workflow_id = crate::workflow::generate_workflow_id();
+                        let logger_handle: Option<crate::workflow::LoggerHandle> = match std::env::current_dir()
+                            .ok()
+                            .and_then(|cwd| {
+                                crate::workflow::WorkflowLogger::new(workflow_id.clone(), &cwd).ok()
+                            }) {
+                            Some(mut l) => {
+                                let _ = l.start(prompt, &script);
+                                Some(std::sync::Arc::new(std::sync::Mutex::new(l)))
+                            }
+                            None => {
+                                println!(
+                                    "{COLOR_DIM}/workflow run: state.jsonl unavailable — proceeding without checkpoint{COLOR_RESET}"
+                                );
+                                None
+                            }
+                        };
+                        println!("{COLOR_DIM}/workflow run: id={workflow_id}{COLOR_RESET}");
+
+                        let wf_started = std::time::Instant::now();
+                        // Route thclaws.subagent through the parent's
+                        // Task tool. `None` is acceptable — the sandbox
+                        // falls back to a stub that echoes prompts,
+                        // useful if the registry doesn't have the tool
+                        // (e.g. a minimal config). spawn_blocking lets
+                        // the JS host functions use
+                        // `Handle::block_on` without nesting runtimes.
+                        let task_tool = tool_registry.get(crate::subagent::TOOL_NAME);
+                        let logger_for_thread = logger_handle.clone();
+                        // Boa's JsError contains Rc<> types and isn't
+                        // Send — stringify before crossing the
+                        // spawn_blocking boundary.
+                        let result: std::result::Result<
+                            std::result::Result<String, String>,
+                            tokio::task::JoinError,
+                        > = tokio::task::spawn_blocking(move || {
+                            crate::workflow::set_task_tool(task_tool);
+                            crate::workflow::set_logger(logger_for_thread);
+                            let res = (|| -> std::result::Result<String, String> {
+                                let mut sandbox = crate::workflow::WorkflowSandbox::new()
+                                    .map_err(|e| e.to_string())?;
+                                sandbox.run(&script).map_err(|e| e.to_string())
+                            })();
+                            crate::workflow::set_task_tool(None);
+                            crate::workflow::set_logger(None);
+                            res
+                        })
+                        .await;
+
+                        let mut workers_count: u32 = 0;
+                        if let Some(handle) = &logger_handle {
+                            if let Ok(mut l) = handle.lock() {
+                                let _ = match &result {
+                                    Ok(Ok(text)) => l.done(text),
+                                    Ok(Err(e)) => l.error(e),
+                                    Err(e) => l.error(&e.to_string()),
+                                };
+                                workers_count = l.worker_count();
+                            }
+                        }
+                        let total = crate::tool_display::format_duration(wf_started.elapsed());
+                        println!(
+                            "{COLOR_DIM}workflow done — {workers_count} workers, total {total}{COLOR_RESET}"
+                        );
+
+                        match result {
+                            Ok(Ok(text)) => println!("{COLOR_GREEN}{text}{COLOR_RESET}"),
+                            Ok(Err(e)) => println!(
+                                "{COLOR_YELLOW}/workflow run: script failed: {e}{COLOR_RESET}"
+                            ),
+                            Err(e) => println!(
+                                "{COLOR_YELLOW}/workflow run: worker thread panicked: {e}{COLOR_RESET}"
+                            ),
+                        }
+                    }
                 }
                 SlashCommand::Unknown(what) => {
                     println!("{COLOR_YELLOW}unknown command: {what}{COLOR_RESET}");

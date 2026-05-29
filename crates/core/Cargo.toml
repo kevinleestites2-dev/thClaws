@@ -148,6 +148,12 @@ image = "0.24"
 # builds and the GUI-only path can opt out without pulling in BLE stacks.
 btleplug = { version = "0.11", optional = true }
 
+# Embedded JS engine for the `/workflow` slash command (dev-plan/32 —
+# code-driven subagent fan-out). Pure-Rust, no V8 dep; we attach only
+# the `thclaws.*` host bindings and strip `eval` / `Function` so scripts
+# can't escape the sandbox. MSRV bumps to 1.88 because of this.
+boa_engine = "0.21"
+
 [features]
 # `cost_bridge` is OPT-IN, not default: it starts a BLE scan on launch
 # (cost_bridge::spawn → adapter.start_scan), which on macOS triggers a
