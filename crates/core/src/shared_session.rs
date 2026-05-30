@@ -578,6 +578,12 @@ pub struct SharedSessionHandle {
     /// the IPC dispatch (`IpcContext.workflow_approver`) so both
     /// reach the same pending-request map.
     pub workflow_approver: std::sync::Arc<crate::workflow::WorkflowApprover>,
+    /// dev-plan/35 Tier 1 multi-tenant override: when `Some`,
+    /// session JSONLs, gui-shell storage, and usage metering for
+    /// this handle write to per-user roots instead of the cwd /
+    /// HOME-relative defaults. `None` for single-tenant `--serve`,
+    /// desktop GUI, and CLI — those use the legacy paths unchanged.
+    pub session_roots: Option<crate::multi_tenant::SessionRoots>,
 }
 
 impl SharedSessionHandle {
@@ -601,6 +607,13 @@ pub struct WorkerState {
     pub config: AppConfig,
     pub session: Session,
     pub session_store: Option<SessionStore>,
+    /// dev-plan/35 Tier 1: per-user roots when this worker belongs to
+    /// a multi-tenant pod, `None` for single-tenant. Forwarded from
+    /// [`spawn_with_roots`] and consulted at every site that would
+    /// otherwise pick up `SessionStore::default_path()` /
+    /// `UsageTracker::default_path()` — keeps the override sticky
+    /// across `/new`, `/reload`, model swaps, and session forks.
+    pub session_roots: Option<crate::multi_tenant::SessionRoots>,
     pub tool_registry: ToolRegistry,
     pub system_prompt: String,
     pub cwd: PathBuf,
@@ -1075,6 +1088,19 @@ pub fn spawn() -> SharedSessionHandle {
 pub fn spawn_with_approver(
     approver: std::sync::Arc<dyn crate::permissions::ApprovalSink>,
 ) -> SharedSessionHandle {
+    spawn_with_roots(approver, None)
+}
+
+/// dev-plan/35 Tier 1 multi-tenant entry point. Same as
+/// [`spawn_with_approver`] but threads a [`SessionRoots`] override
+/// into the worker so session JSONLs, gui-shell storage, and usage
+/// metering land under per-user prefixes instead of the cwd /
+/// HOME-relative defaults. `None` → identical behaviour to
+/// `spawn_with_approver` (single-tenant defaults).
+pub fn spawn_with_roots(
+    approver: std::sync::Arc<dyn crate::permissions::ApprovalSink>,
+    session_roots: Option<crate::multi_tenant::SessionRoots>,
+) -> SharedSessionHandle {
     let (input_tx, input_rx) = mpsc::channel::<ShellInput>();
     let (events_tx, _) = broadcast::channel::<ViewEvent>(256);
     let cancel = crate::cancel::CancelToken::new();
@@ -1091,6 +1117,7 @@ pub fn spawn_with_approver(
     let gate_for_thread = ready_gate.clone();
     let injection_queue_for_worker = injection_queue.clone();
     let workflow_approver_for_worker = workflow_approver.clone();
+    let session_roots_for_worker = session_roots.clone();
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -1103,6 +1130,7 @@ pub fn spawn_with_approver(
                 gate_for_thread,
                 injection_queue_for_worker,
                 workflow_approver_for_worker,
+                session_roots_for_worker,
             ));
         }));
         if let Err(payload) = result {
@@ -1125,6 +1153,7 @@ pub fn spawn_with_approver(
         ready_gate,
         injection_queue,
         workflow_approver,
+        session_roots,
     }
 }
 
@@ -1184,6 +1213,7 @@ async fn run_worker(
     ready_gate: Arc<ReadyGate>,
     injection_queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
     workflow_approver: std::sync::Arc<crate::workflow::WorkflowApprover>,
+    session_roots: Option<crate::multi_tenant::SessionRoots>,
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let config = AppConfig::load().unwrap_or_default();
@@ -1650,7 +1680,13 @@ async fn run_worker(
         });
     }
 
-    let session_store = SessionStore::default_path().map(SessionStore::new);
+    // dev-plan/35 Tier 1: per-user override beats `default_path()`
+    // when this worker belongs to a multi-tenant pod.
+    let session_store = session_roots
+        .as_ref()
+        .map(|r| r.sessions_dir.clone())
+        .or_else(SessionStore::default_path)
+        .map(SessionStore::new);
     let current_session = Session::new(&config.model, cwd.to_string_lossy());
     // Point the plan-persistence arc at the initial session's JSONL
     // path so any SubmitPlan / UpdatePlanStep call before the first
@@ -1698,6 +1734,7 @@ async fn run_worker(
         config,
         session: current_session,
         session_store,
+        session_roots: session_roots.clone(),
         tool_registry: tools,
         system_prompt: system,
         cwd,
@@ -2877,8 +2914,19 @@ async fn run_worker(
                 // pinned to the previous workspace's `.thclaws/sessions/`,
                 // so saves land in the wrong project and the sidebar
                 // never reflects the new project's sessions.
-                state.session_store =
-                    crate::session::SessionStore::default_path().map(SessionStore::new);
+                //
+                // dev-plan/35 Tier 1: the per-user override (multi-
+                // tenant pod) is sticky across cwd changes — a user's
+                // session JSONL must keep landing in their own
+                // <project>/.thclaws/users/<id>/sessions/ regardless
+                // of any `/cd` inside the worker. The single-tenant
+                // `None` path keeps the old cwd-relative default.
+                state.session_store = state
+                    .session_roots
+                    .as_ref()
+                    .map(|r| r.sessions_dir.clone())
+                    .or_else(crate::session::SessionStore::default_path)
+                    .map(SessionStore::new);
 
                 // If the model changed, rebuild the agent without history
                 // — the new provider's message schema may not match the
@@ -3773,8 +3821,13 @@ async fn drive_turn_stream(
                 // GUI shell silently dropped every turn's usage
                 // regardless of provider).
                 let provider_name = state.config.detect_provider().unwrap_or("unknown");
-                let tracker =
-                    crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
+                let tracker = crate::usage::UsageTracker::new(
+                    state
+                        .session_roots
+                        .as_ref()
+                        .map(|r| r.usage_dir.clone())
+                        .unwrap_or_else(crate::usage::UsageTracker::default_path),
+                );
                 tracker.record(provider_name, &state.config.model, &usage);
 
                 // Cost accounting (GUI parity with the CLI REPL). Drain
@@ -4171,8 +4224,13 @@ async fn handle_team_messages(
                 write_lead_log(&state.lead_log, "\x1b[0m\n");
                 let _ = lead_mb.write_status("lead", "active", None);
                 let provider_name = state.config.detect_provider().unwrap_or("unknown");
-                let tracker =
-                    crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
+                let tracker = crate::usage::UsageTracker::new(
+                    state
+                        .session_roots
+                        .as_ref()
+                        .map(|r| r.usage_dir.clone())
+                        .unwrap_or_else(crate::usage::UsageTracker::default_path),
+                );
                 tracker.record(provider_name, &state.config.model, &usage);
                 save_history(&state.agent, &mut state.session, &state.session_store);
                 let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
